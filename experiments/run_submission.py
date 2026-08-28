@@ -1,20 +1,28 @@
 # Canonical IEEE TIFS submission experiment.
-# Corrected protocol: common federated initialization, sample-weighted
-# FedAvg/FedProx, online-only feature normalization, source-account-consistent
-# typology skew, time-consistent drift injection, client-macro metrics, and
-# seed-level statistical inference.
+# Revision protocol: common federated initialization and optimizer policy,
+# online-only feature normalization, source-account-consistent ownership,
+# supported-window evaluation, time-consistent drift injection, stream-level
+# client-macro metrics, component ablations, and seed-level inference.
 
 # ===== cell01_config_local.py =====
 # ---------------- 0. Config ----------------
 import os
+# Required by CUDA when deterministic algorithms are enabled later in this
+# script. It must be set before importing torch/CuBLAS-backed modules.
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 FAST_DEV      = os.environ.get("FT_FAST_DEV", "0") == "1"
 DATASET       = os.environ.get("FT_DATASET", "ibm").strip().lower()
 if DATASET not in {"ibm","samld"}:
     raise ValueError("FT_DATASET must be 'ibm' or 'samld'")
+PARTITION_MODE = os.environ.get("FT_PARTITION", "account_hash").strip().lower()
+if PARTITION_MODE not in {"account_hash", "typology_skew"}:
+    raise ValueError("FT_PARTITION must be 'account_hash' or 'typology_skew'")
+OPTIMIZER_POLICY = os.environ.get("FT_OPTIMIZER_POLICY", "per_round").strip().lower()
+if OPTIMIZER_POLICY not in {"per_round", "broadcast_only"}:
+    raise ValueError("FT_OPTIMIZER_POLICY must be 'per_round' or 'broadcast_only'")
 SEED          = 42
 K_CLIENTS     = 5
 D_MODEL       = 64
-N_WINDOWS_CAP = 20   # reporting target; loaders retain every natural window
 WINDOW_FREQ   = "24h" if DATASET=="ibm" else "17D"
 LOCAL_EPOCHS  = 1
 LR            = 2e-3
@@ -23,8 +31,9 @@ LAMBDA_ALERT  = 0.4        # weight of noisy alert labels vs confirmed
 M_PROTO       = 4          # prototypes per client (v2: was 6; positives are scarce)
 MIN_CONF_POS  = 8          # v2: min confirmed positives before building prototypes
 NEG_SUBSAMPLE = 4000 if FAST_DEV else 20000
-VALID_W       = 20         # metrics computed on windows < VALID_W
 EVAL_START_W  = 1          # window 0 initializes client-local online statistics
+TAIL_SUPPORT_FRACTION = 0.01  # trim only a contiguous, extremely sparse tail
+MIN_SUPPORTED_WINDOW_TXNS = 1000
 RHO_DAMP      = 0.2        # cross-cluster damping
 BETA_REGISTRY = 0.15       # registry risk-boost weight (inoculation mechanism)
 NOVELTY_GATE  = 0.3        # v2: was 0.5
@@ -36,9 +45,11 @@ DELAY_MEDIAN_WINDOWS = 3   # normalized evaluation cycles, not calendar weeks
 BUDGET_K      = 50         # precision@budget alerts per client per window
 ROWS_DEV      = 350000 if FAST_DEV else None
 N_SUBMISSION_SEEDS = 1 if FAST_DEV else int(os.environ.get("FT_N_SEEDS","10"))
+if N_SUBMISSION_SEEDS < 1:
+    raise ValueError("FT_N_SEEDS must be at least 1")
 SUBMISSION_SEEDS = tuple(range(42,42+N_SUBMISSION_SEEDS))
 
-import math, json, random, warnings
+import math, json, random
 import hashlib
 import numpy as np, pandas as pd
 import matplotlib
@@ -48,7 +59,6 @@ import networkx as nx
 from sklearn.cluster import KMeans, AgglomerativeClustering
 from sklearn.metrics import average_precision_score
 from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
-warnings.filterwarnings("ignore")
 rng = np.random.default_rng(SEED); random.seed(SEED); np.random.seed(SEED)
 WINDOW_SECONDS = int(pd.Timedelta(WINDOW_FREQ).total_seconds())
 
@@ -174,15 +184,85 @@ def load_samld(nrows=None):
     d["time_window"]=((ts-ts.min())/pd.Timedelta(WINDOW_FREQ)).astype(int)
     return compact_model_frame(d)
 
+def trim_sparse_terminal_windows(frame):
+    """Remove only a contiguous terminal fragment with negligible support.
+
+    The rule uses transaction counts, never labels.  It prevents a few
+    incomplete tail records from receiving the same temporal weight as a full
+    window and from becoming artificial drift targets.  Complete SAML-D
+    windows pass the rule unchanged; the IBM AMLworld tail after day 10 does
+    not.
+    """
+    observed=frame.groupby("time_window").size().sort_index()
+    if observed.empty or int(observed.index.min())!=0:
+        raise RuntimeError("Natural time windows must start at zero")
+    # Reindex so an empty internal natural window cannot evade the contiguous
+    # suffix audit merely because groupby omitted it.
+    counts=observed.reindex(
+        pd.RangeIndex(0,int(observed.index.max())+1,name="time_window"),
+        fill_value=0)
+    median_count=float(counts.median())
+    threshold=max(MIN_SUPPORTED_WINDOW_TXNS,
+                  int(math.ceil(TAIL_SUPPORT_FRACTION*median_count)))
+    sparse=(counts<threshold).to_numpy()
+    if sparse.all():
+        raise RuntimeError("No natural window meets the transaction-support rule")
+    if sparse.any():
+        first_sparse=int(np.flatnonzero(sparse)[0])
+        if (~sparse[first_sparse:]).any():
+            raise RuntimeError(
+                "A sparse internal window is followed by supported data; "
+                "refusing a non-contiguous support trim")
+        last_supported=first_sparse-1
+    else:
+        last_supported=int(counts.index.max())
+    if last_supported < 0:
+        raise RuntimeError("No supported warm-up window remains after tail trimming")
+    retained_window_ids=list(range(last_supported+1))
+    excluded_window_ids=list(range(last_supported+1,int(counts.index.max())+1))
+    kept=frame[frame.time_window<=last_supported].copy()
+    audit={
+        "full_windows":int(counts.index.max())+1,
+        "supported_windows":last_supported+1,
+        "median_window_transactions":median_count,
+        "minimum_supported_transactions":threshold,
+        "full_transactions":int(len(frame)),
+        "retained_transactions":int(len(kept)),
+        "trimmed_transactions":int(len(frame)-len(kept)),
+        "retained_fraction":float(len(kept)/len(frame)),
+        "retained_window_ids":retained_window_ids,
+        "excluded_window_ids":excluded_window_ids,
+    }
+    return kept,audit,counts.reset_index(name="transactions")
+
 if DATASET=="ibm" and IBM_PATH and os.path.exists(IBM_PATH):
-    df = load_ibm(nrows=ROWS_DEV)
+    df = load_ibm(nrows=None)
     DATA_NAME="IBM-AML HI-Small"
 elif DATASET=="samld":
-    df=load_samld(nrows=ROWS_DEV)
+    df=load_samld(nrows=None)
     DATA_NAME="SAML-D"
 else:
     raise RuntimeError(f"unreachable dataset selection: {DATASET}")
+
+if FAST_DEV and ROWS_DEV is not None and len(df)>ROWS_DEV:
+    # A file-prefix reduction can collapse to the first time window when the
+    # source CSV is time ordered, leaving no post-warm-up window to exercise.
+    # Keep a deterministic, time-only sample from every natural window instead.
+    natural_windows=sorted(df.time_window.unique())
+    per_window=max(1, ROWS_DEV//len(natural_windows))
+    dev_parts=[]
+    for window,group in df.groupby("time_window",sort=True):
+        if len(group)>per_window:
+            group=group.sample(n=per_window,random_state=SEED+int(window))
+        dev_parts.append(group)
+    df=(pd.concat(dev_parts,ignore_index=True)
+          .sort_values(["time_window","txn_id"])
+          .reset_index(drop=True))
+    print(f"fast-dev stratified rows={len(df):,} "
+          f"natural_windows={len(natural_windows)}")
+df,SUPPORT_AUDIT,FULL_WINDOW_COUNTS=trim_sparse_terminal_windows(df)
 N_WINDOWS = int(df.time_window.max())+1
+VALID_W = N_WINDOWS
 if df.loc[df.label==1,"typology_id"].nunique()<2:
     raise RuntimeError(
         "Fewer than two positive typologies were parsed; drift and "
@@ -193,6 +273,7 @@ print(f"dataset={DATA_NAME} txns={len(df):,} "
       f"windows={N_WINDOWS} prevalence={100*df.label.mean():.4f}% "
       f"positives={int(df.label.sum()):,} "
       f"typologies={df.loc[df.typology_id>=0,'typology_id'].nunique()}")
+print("window support:", SUPPORT_AUDIT)
 
 # ===== cell03_partition.py =====
 # ---------------- 2. Partition (P1 community x P2 typology-skew) ----------------
@@ -206,6 +287,20 @@ def partition_community(df,k,seed=SEED):
         for a in c: a2c[a]=j
     out=df.src_account.map(a2c).fillna(0).astype(int)
     return pd.Series(out.values,index=df.txn_id.values,name="client")
+
+def partition_account_hash(df,k,seed=SEED):
+    """Stable label- and future-independent source-account assignment.
+
+    SplitMix64 maps each account independently, so an account's silo does not
+    change when later accounts or transactions are appended to the stream.
+    """
+    x=df.src_account.to_numpy(dtype=np.uint64,copy=True)
+    x += np.uint64(seed)+np.uint64(0x9E3779B97F4A7C15)
+    x=(x^(x>>np.uint64(30)))*np.uint64(0xBF58476D1CE4E5B9)
+    x=(x^(x>>np.uint64(27)))*np.uint64(0x94D049BB133111EB)
+    x=x^(x>>np.uint64(31))
+    out=(x%np.uint64(k)).astype(np.int16)
+    return pd.Series(out,index=df.txn_id.values,name="client")
 
 def apply_typology_skew(df,assign,alpha=0.3,seed=SEED):
     """Induce typology skew without splitting a source account across clients.
@@ -268,8 +363,11 @@ class DriftInjector:
 def build_data(condition, seed):
     """Build (df_e, assign_e, drift_events) for one experiment. condition in {'control','drift'}."""
     rng_e = np.random.default_rng(seed)
-    assign_e = apply_typology_skew(df, partition_community(df,K_CLIENTS,seed=seed),
-                                   alpha=0.3, seed=seed)
+    if PARTITION_MODE=="typology_skew":
+        assign_e = apply_typology_skew(
+            df,partition_community(df,K_CLIENTS,seed=seed),alpha=0.3,seed=seed)
+    else:
+        assign_e = partition_account_hash(df,K_CLIENTS,seed=seed)
     d = df.copy()
     events = pd.DataFrame()
     if condition == "drift":
@@ -304,7 +402,11 @@ def build_data(condition, seed):
 
 # ===== cell05_features.py =====
 # ---------------- 4. Feature engineering ----------------
-CHANNELS = df.channel.astype(str).unique().tolist()[:8]
+# Learn the categorical vocabulary from the declared warm-up only.  Future
+# categories remain a valid all-zero "other" encoding rather than leaking the
+# full-stream vocabulary into the initial model.
+CHANNELS = (df[df.time_window<EVAL_START_W].channel.astype(str)
+            .value_counts().index.tolist()[:8])
 CH_IDX={c:i for i,c in enumerate(CHANNELS)}
 def edge_features(sub, client_stats=None):
     la=np.log1p(sub.amount.values)
@@ -362,7 +464,14 @@ class Backbone(nn.Module):
         e = F.relu(self.edge_in(efeat))
         h = self.mp(mem, src, dst, e, self.att1, self.upd1, n)
         h = self.mp(h,  src, dst, e, self.att2, self.upd2, n)
-        new_mem = self.gru(h, mem)
+        candidate = self.gru(h, mem)
+        # A single batched graph pass represents one natural window.  Only
+        # accounts incident to an edge in that window advance their temporal
+        # state; inactive accounts retain their previous memory exactly.
+        active=torch.zeros(n,dtype=torch.bool,device=mem.device)
+        active[src]=True; active[dst]=True
+        new_mem=mem.clone()
+        new_mem[active]=candidate[active]
         edge_emb = torch.cat([new_mem[src], new_mem[dst], e], 1)   # [E, 3d]
         return new_mem, edge_emb
 
@@ -402,6 +511,8 @@ class Client:
         self.pos_seen=0
         self.last_train_count=1
         self.proto_purity=np.nan; self.proto_nmi=np.nan; self.proto_ari=np.nan
+        self.proto_named_purity=np.nan; self.proto_named_nmi=np.nan
+        self.proto_named_ari=np.nan; self.proto_cosine_gap=np.nan
     def reset_optimizer(self):
         # Standard FL uses a fresh local optimizer after every server broadcast.
         self.opt=torch.optim.Adam(list(self.backbone.parameters())+list(self.head.parameters()),
@@ -514,12 +625,33 @@ class Client:
         self.proto_tau=float(np.quantile(dmin,0.95))
         truth=conf.typology_id.to_numpy()
         pred=km.labels_
-        self.proto_nmi=float(normalized_mutual_info_score(truth,pred))
-        self.proto_ari=float(adjusted_rand_score(truth,pred))
-        self.proto_purity=float(sum(
-            np.bincount(truth[pred==cluster].astype(int)).max()
-            for cluster in np.unique(pred)
-        )/len(truth))
+        def fidelity(y_true,y_pred):
+            if len(y_true)==0 or len(np.unique(y_true))<2:
+                return np.nan,np.nan,np.nan
+            purity=float(sum(
+                np.bincount(y_true[y_pred==cluster].astype(int)).max()
+                for cluster in np.unique(y_pred)
+            )/len(y_true))
+            return (purity,
+                    float(normalized_mutual_info_score(y_true,y_pred)),
+                    float(adjusted_rand_score(y_true,y_pred)))
+        (self.proto_purity,self.proto_nmi,self.proto_ari)=fidelity(truth,pred)
+        named=(truth!=UNSTRUCTURED) if DATASET=="ibm" else np.ones(len(truth),dtype=bool)
+        (self.proto_named_purity,self.proto_named_nmi,
+         self.proto_named_ari)=fidelity(truth[named],pred[named])
+        # A label-free clustering need not recover the benchmark taxonomy
+        # exactly.  This complementary diagnostic asks whether transactions
+        # with the same annotated type are at least closer in embedding space.
+        if len(X)>=3:
+            r=np.random.default_rng(self.seed+w+991)
+            take=r.choice(len(X),min(512,len(X)),replace=False)
+            xs=X[take]; ys=truth[take]
+            sim=xs@xs.T
+            same=ys[:,None]==ys[None,:]
+            np.fill_diagonal(same,False)
+            diff=~same; np.fill_diagonal(diff,False)
+            if same.any() and diff.any():
+                self.proto_cosine_gap=float(sim[same].mean()-sim[diff].mean())
     def signal1(self, emb_now, emb_ref):
         if emb_now is None or emb_ref is None or len(emb_now)<8 or len(emb_ref)<8: return 0.0
         r=np.random.default_rng(self.seed)
@@ -558,20 +690,31 @@ def chamfer(P,Q):
     S=P@Q.T
     return float(1-0.5*(S.max(1).mean()+S.max(0).mean()))
 
-def cluster_clients(clients):
+def cluster_clients(clients,n_groups=2):
     have=[c for c in clients if c.protos is not None]
-    if len(have)<3: return {c.id:0 for c in clients}                 # v2 guard
+    if n_groups<=1 or len(have)<max(3,n_groups):
+        return {c.id:0 for c in clients}
     n=len(have); D=np.zeros((n,n))
     for i in range(n):
         for j in range(i+1,n):
             D[i,j]=D[j,i]=chamfer(have[i].protos,have[j].protos)
-    lab=AgglomerativeClustering(n_clusters=2,metric="precomputed",
+    lab=AgglomerativeClustering(n_clusters=n_groups,metric="precomputed",
                                 linkage="average").fit_predict(D)
     out={c.id:int(l) for c,l in zip(have,lab)}
     for c in clients: out.setdefault(c.id,0)
     return out
 
-def fedavg_aggregate(clients, weights=None, groups=None):
+def random_client_groups(clients,n_groups,seed):
+    have=[c for c in clients if c.protos is not None]
+    if n_groups<=1 or len(have)<max(3,n_groups):
+        return {c.id:0 for c in clients}
+    order=np.array(sorted(c.id for c in have),dtype=int)
+    np.random.default_rng(seed).shuffle(order)
+    out={int(cid):int(i%n_groups) for i,cid in enumerate(order)}
+    for c in clients: out.setdefault(c.id,0)
+    return out
+
+def fedavg_aggregate(clients, weights=None, groups=None, rho=RHO_DAMP):
     sds=[c.backbone.state_dict() for c in clients]
     if weights is None: weights=[1.0]*len(clients)
     wsum=sum(weights); weights=[w/wsum for w in weights]
@@ -583,7 +726,7 @@ def fedavg_aggregate(clients, weights=None, groups=None):
         idx=[i for i,c in enumerate(clients) if groups[c.id]==g]
         wsub=[weights[i] for i in idx]; s=sum(wsub) or 1.0
         cmean={k:sum(w/s*sds[i][k].float() for w,i in zip(wsub,idx)) for k in sds[0]}
-        mix={k:(1-RHO_DAMP)*cmean[k]+RHO_DAMP*gmean[k] for k in cmean}
+        mix={k:(1-rho)*cmean[k]+rho*gmean[k] for k in cmean}
         for i in idx: clients[i].backbone.load_state_dict(mix)
     return None
 
@@ -658,6 +801,11 @@ def cda_drift_detected(Q, lam=CDA_LAMBDA, delta=CDA_DELTA):
             sf = max(sf, sk)
     return sf > Th
 
+FEDTYPO_METHODS={
+    "fedtypo","fedtypo_noreg","ablate_g1","ablate_g3",
+    "ablate_random","ablate_nommd","ablate_samplewt","ablate_rho0",
+}
+
 def run_method(method, df, assign, seed=SEED, verbose=True):
     torch.manual_seed(seed); np.random.seed(seed); random.seed(seed)
     N_WINDOWS = int(df.time_window.max())+1
@@ -684,7 +832,7 @@ def run_method(method, df, assign, seed=SEED, verbose=True):
                 rows.append(pd.DataFrame(dict(window=w,client=c.id,score=score,
                     label=sub.label.values,typ=sub.typology_id.values)))
                 window_scores[c.id] = score
-            if method in ("fedtypo","fedtypo_noreg") and emb is not None:
+            if method in FEDTYPO_METHODS and emb is not None:
                 e=emb.numpy(); c.signal1(e, ref_emb[c.id]); ref_emb[c.id]=e
         # ---- TRAIN on visible labels ----
         for c in clients:
@@ -722,10 +870,11 @@ def run_method(method, df, assign, seed=SEED, verbose=True):
                             loss = focal_loss(logit, y)
                             c.opt.zero_grad(); loss.backward(); c.opt.step()
         # ---- FEDERATE ----
+        broadcasted=False
         if method in ("fedavg","fedprox","cda_fedavg"):
             sample_weights=[c.last_train_count for c in clients]
             global_params=fedavg_aggregate(clients,weights=sample_weights)
-            for c in clients: c.reset_optimizer()
+            broadcasted=True
         elif method=="fedproto":
             local=[c.class_prototypes(w) for c in clients]
             merged={}
@@ -736,7 +885,7 @@ def run_method(method, df, assign, seed=SEED, verbose=True):
                     mean=sum(count*proto for proto,count in available)/total
                     merged[cls]=mean/(np.linalg.norm(mean)+1e-9)
             global_class_protos=merged
-        elif method in ("fedtypo","fedtypo_noreg"):
+        elif method in FEDTYPO_METHODS:
             fracs=[]
             for c in clients:
                 if c.pos_seen < 30 or w < 3:
@@ -752,18 +901,38 @@ def run_method(method, df, assign, seed=SEED, verbose=True):
                     proto_rows.append(dict(
                         window=w,client=c.id,purity=c.proto_purity,
                         nmi=c.proto_nmi,ari=c.proto_ari,
+                        named_purity=c.proto_named_purity,
+                        named_nmi=c.proto_named_nmi,
+                        named_ari=c.proto_named_ari,
+                        cosine_gap=c.proto_cosine_gap,
                         confirmed_positives=c.pos_seen))
             if w % 3 == 0:
-                groups=cluster_clients(clients)
-            wts=[max(1,c.pos_seen)*max(0.05,c.stability) for c in clients]
-            fedavg_aggregate(clients,weights=wts,groups=groups)
-            for c in clients: c.reset_optimizer()
+                if method=="ablate_g1":
+                    groups={c.id:0 for c in clients}
+                elif method=="ablate_g3":
+                    groups=cluster_clients(clients,n_groups=3)
+                elif method=="ablate_random":
+                    groups=random_client_groups(clients,n_groups=2,seed=seed)
+                else:
+                    groups=cluster_clients(clients,n_groups=2)
+            if method=="ablate_samplewt":
+                wts=[c.last_train_count for c in clients]
+            elif method=="ablate_nommd":
+                wts=[max(1,c.pos_seen) for c in clients]
+            else:
+                wts=[max(1,c.pos_seen)*max(0.05,c.stability) for c in clients]
+            rho=0.0 if method=="ablate_rho0" else RHO_DAMP
+            fedavg_aggregate(clients,weights=wts,groups=groups,rho=rho)
+            broadcasted=True
             n_proto=sum(c.protos is not None for c in clients)
             conf_pos=[int(c.txns.loc[c.txns.confirmed_window<=w,"label"].sum()) for c in clients]
-            print(f"  [diag w={w}] confirmed_pos/client={conf_pos} "
-                  f"protos_built={n_proto}/{len(clients)} registry={len(registry)} "
-                  f"novelty_frac={fracs} clusters={groups} "
-                  f"stability={[round(c.stability,2) for c in clients]}")
+            if verbose:
+                print(f"  [diag w={w}] confirmed_pos/client={conf_pos} "
+                      f"protos_built={n_proto}/{len(clients)} registry={len(registry)} "
+                      f"novelty_frac={fracs} clusters={groups} "
+                      f"stability={[round(c.stability,2) for c in clients]}")
+        if OPTIMIZER_POLICY=="per_round" or broadcasted:
+            for c in clients: c.reset_optimizer()
         if verbose and w%5==0: print(f"  [{method}] window {w}/{N_WINDOWS}")
     return (pd.concat(rows,ignore_index=True), pd.DataFrame(registry_log),
             pd.DataFrame(proto_rows))
@@ -771,12 +940,38 @@ def run_method(method, df, assign, seed=SEED, verbose=True):
 def metrics_table(res):
     out=[]
     for (w,client),g in res.groupby(["window","client"]):
-        auprc=average_precision_score(g.label,g.score) if g.label.sum()>0 else np.nan
+        positives=int(g.label.sum()); transactions=len(g)
+        prevalence=positives/transactions if transactions else np.nan
+        auprc=average_precision_score(g.label,g.score) if positives>0 else np.nan
         topk=g.nlargest(min(BUDGET_K,len(g)),"score")
         out.append(dict(window=w,client=client,auprc=auprc,
+                        ap_lift=(auprc/prevalence)
+                                if positives>0 and prevalence>0 else np.nan,
                         p_at_budget=topk.label.mean() if len(topk) else np.nan,
-                        positives=int(g.label.sum()),transactions=len(g)))
+                        positives=positives,transactions=transactions,
+                        prevalence=prevalence))
     return pd.DataFrame(out)
+
+def stream_metrics_table(res):
+    """Primary metric: concatenate every evaluated window within each client.
+
+    This includes the negative transactions from client-windows with no
+    positives, while retaining clients (rather than transactions or windows)
+    as the macro units.
+    """
+    evaluated=res[(res.window>=EVAL_START_W)&(res.window<VALID_W)]
+    rows=[]
+    for client,g in evaluated.groupby("client"):
+        positives=int(g.label.sum()); transactions=len(g)
+        prevalence=positives/transactions if transactions else np.nan
+        auprc=(average_precision_score(g.label,g.score)
+               if positives>0 else np.nan)
+        rows.append(dict(client=int(client),auprc=auprc,
+                         ap_lift=(auprc/prevalence)
+                                 if prevalence and prevalence>0 else np.nan,
+                         positives=positives,transactions=transactions,
+                         prevalence=prevalence))
+    return pd.DataFrame(rows)
 
 # ===== cell10_helpers_local.py =====
 # ---------------- 9. Helpers needed for the sensitivity sweep ----------------
@@ -789,27 +984,46 @@ def per_window(r):
         (client_metrics.window>=EVAL_START_W)&
         (client_metrics.window<VALID_W)
     ]
-    return (client_metrics.groupby("window",as_index=False)
-            .agg(auprc=("auprc","mean"),
-                 p_at_budget=("p_at_budget","mean"),
-                 valid_clients=("auprc","count"),
-                 positives=("positives","sum"),
-                 transactions=("transactions","sum")))
+    out=(client_metrics.groupby("window",as_index=False)
+         .agg(auprc=("auprc","mean"),ap_lift=("ap_lift","mean"),
+              p_at_budget=("p_at_budget","mean"),
+              positive_clients=("auprc","count"),
+              total_clients=("client","nunique"),
+              positives=("positives","sum"),
+              transactions=("transactions","sum")))
+    out["prevalence"]=out.positives/out.transactions
+    return out
 
 # ---------------- 11. Submission experiment matrix ----------------
-from scipy.stats import wilcoxon
+from scipy.stats import wilcoxon,rankdata
 
-METHODS_FULL = (["local_only","fedavg","fedproto","fedtypo"] if FAST_DEV else
-                ["local_only","fedavg","fedprox","fedproto","fedtypo_noreg",
-                 "fedtypo","cda_fedavg"])
+PRIMARY_METHODS=["local_only","fedavg","fedprox","fedproto",
+                 "fedtypo_noreg","fedtypo","cda_fedavg"]
+ABLATION_METHODS=["ablate_g1","ablate_g3","ablate_random","ablate_nommd",
+                  "ablate_samplewt","ablate_rho0"]
+ALL_METHODS=PRIMARY_METHODS+ABLATION_METHODS
+default_methods=(["local_only","fedavg","fedproto","fedtypo"]
+                 if FAST_DEV else ALL_METHODS)
+requested_methods=os.environ.get("FT_METHODS","").strip()
+METHODS_FULL=([m.strip() for m in requested_methods.split(",") if m.strip()]
+              if requested_methods else default_methods)
+unknown_methods=sorted(set(METHODS_FULL)-set(ALL_METHODS))
+if unknown_methods:
+    raise ValueError(f"Unknown FT_METHODS entries: {unknown_methods}")
+requested_conditions=os.environ.get("FT_CONDITIONS","control,drift")
+CONDITIONS=tuple(c.strip() for c in requested_conditions.split(",") if c.strip())
+if not CONDITIONS or set(CONDITIONS)-{"control","drift"}:
+    raise ValueError("FT_CONDITIONS must contain control and/or drift")
 EXPERIMENTS_FULL = [
     (condition,seed)
-    for condition in ("control","drift")
+    for condition in CONDITIONS
     for seed in SUBMISSION_SEEDS
 ]
-run_name=('tifs_submission_smoke_v3' if FAST_DEV else 'tifs_submission_v2')
-RES2 = f"{OUT}/results/{run_name}_{DATASET}"
+run_name=os.environ.get(
+    "FT_RUN_NAME",'tifs_revision_smoke_v1' if FAST_DEV else 'tifs_revision_v1')
+RES2 = f"{OUT}/results/{run_name}_{DATASET}_{PARTITION_MODE}"
 os.makedirs(RES2, exist_ok=True)
+FULL_WINDOW_COUNTS.to_csv(f"{RES2}/raw_window_counts.csv",index=False)
 def file_sha256(path, block_size=8*1024*1024):
     digest=hashlib.sha256()
     with open(path,"rb") as handle:
@@ -832,6 +1046,8 @@ with open(f"{RES2}/environment.json","w") as f:
         } for role,path in _input_paths],
         "script_sha256":file_sha256(__file__),
         "seeds":list(SUBMISSION_SEEDS),
+        "conditions":list(CONDITIONS),
+        "methods":list(METHODS_FULL),
         "python":os.sys.version,
         "torch":torch.__version__,
         "cuda":torch.version.cuda,
@@ -843,8 +1059,13 @@ with open(f"{RES2}/environment.json","w") as f:
         "device":torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
         "config":{
             "clients":K_CLIENTS,"dimension":D_MODEL,
-            "natural_windows":N_WINDOWS,"reporting_target_windows":N_WINDOWS_CAP,
+            "natural_windows":SUPPORT_AUDIT["full_windows"],
+            "supported_windows":SUPPORT_AUDIT["supported_windows"],
             "evaluation_start_window":EVAL_START_W,
+            "evaluation_end_window_exclusive":VALID_W,
+            "partition_mode":PARTITION_MODE,
+            "optimizer_policy":OPTIMIZER_POLICY,
+            "window_support_rule":SUPPORT_AUDIT,
             "window_frequency":WINDOW_FREQ,"local_epochs":LOCAL_EPOCHS,
             "learning_rate":LR,"focal_gamma":FOCAL_GAMMA,
             "alert_tpr":ALERT_TPR,"alert_fpr":ALERT_FPR,
@@ -884,22 +1105,25 @@ def typology_table(res, budget=BUDGET_K):
 
 def inoculation_table(res, events, budget=BUDGET_K):
     if events is None or len(events)==0: return pd.DataFrame()
-    ranked=res.copy()
+    ranked=res[(res.window>=EVAL_START_W)&(res.window<VALID_W)].copy()
     ranked["rank"]=ranked.groupby(["window","client"]).score.rank(
         method="first",ascending=False)
     rows=[]
     d4=events[(events.kind=="D4")&(events.stagger>0)]
     for event in d4.itertuples():
-        q=ranked[(ranked.client==event.client)&
-                 (ranked.typ==event.typology)&
-                 (ranked.label==1)&
-                 (ranked.window>=event.window)]
-        rows.append(dict(client=event.client,typology=event.typology,
-                         onset=event.window,stagger=event.stagger,
-                         positives=len(q),
-                         captured=int((q["rank"]<=budget).sum()),
-                         capture_rate=float((q["rank"]<=budget).mean())
-                                      if len(q) else np.nan))
+        for horizon in (1,3,-1):
+            end=VALID_W if horizon<0 else min(VALID_W,event.window+horizon)
+            q=ranked[(ranked.client==event.client)&
+                     (ranked.typ==event.typology)&
+                     (ranked.label==1)&
+                     (ranked.window>=event.window)&
+                     (ranked.window<end)]
+            rows.append(dict(client=event.client,typology=event.typology,
+                             onset=event.window,stagger=event.stagger,
+                             horizon_windows=horizon,positives=len(q),
+                             captured=int((q["rank"]<=budget).sum()),
+                             capture_rate=float((q["rank"]<=budget).mean())
+                                          if len(q) else np.nan))
     return pd.DataFrame(rows)
 
 for cond, seed in EXPERIMENTS_FULL:
@@ -933,6 +1157,28 @@ for cond, seed in EXPERIMENTS_FULL:
          .query("label == 1")
          .groupby(["client","typology"]).size().unstack(fill_value=0))
     typ.to_csv(f"{d_out}/client_typology_counts.csv")
+    support=(pd.DataFrame({"window":df_e.time_window.to_numpy(),
+                           "client":client_values,
+                           "label":df_e.label.to_numpy()})
+             .groupby("window",as_index=False)
+             .agg(transactions=("label","size"),positives=("label","sum")))
+    support["prevalence"]=support.positives/support.transactions
+    pos_clients=(pd.DataFrame({"window":df_e.time_window.to_numpy(),
+                               "client":client_values,
+                               "label":df_e.label.to_numpy()})
+                 .groupby(["window","client"],as_index=False).label.sum()
+                 .assign(has_positive=lambda x:(x.label>0).astype(int))
+                 .groupby("window",as_index=False).has_positive.sum()
+                 .rename(columns={"has_positive":"positive_clients"}))
+    support=support.merge(pos_clients,on="window",how="left")
+    support.to_csv(f"{d_out}/window_support.csv",index=False)
+    typ_window=(pd.DataFrame({"window":df_e.time_window.to_numpy(),
+                              "label":df_e.label.to_numpy(),
+                              "typology":df_e.typology_id.to_numpy()})
+                .query("label == 1 and typology >= 0")
+                .groupby(["window","typology"],as_index=False).size()
+                .rename(columns={"size":"positives"}))
+    typ_window.to_csv(f"{d_out}/window_typology_counts.csv",index=False)
     for m in METHODS_FULL:
         done=f"{d_out}/DONE_{m}"
         if os.path.exists(done):
@@ -942,6 +1188,8 @@ for cond, seed in EXPERIMENTS_FULL:
             "local" if m=="local_only" else m,
             df_e,assign_e,seed=seed,verbose=False)
         metrics_table(r).to_csv(f"{d_out}/client_metrics_{m}.csv",index=False)
+        stream_metrics_table(r).to_csv(
+            f"{d_out}/stream_metrics_{m}.csv",index=False)
         per_window(r).to_csv(f"{d_out}/window_metrics_{m}.csv",index=False)
         budget_table(r).to_csv(f"{d_out}/budget_metrics_{m}.csv",index=False)
         typology_table(r).to_csv(f"{d_out}/typology_metrics_{m}.csv",index=False)
@@ -970,72 +1218,157 @@ def bootstrap_ci(values,n_boot=10000,seed=20260725):
     return tuple(np.quantile(means,[0.025,0.975]))
 
 seed_rows=[]
-for cond in ("control","drift"):
+for cond in CONDITIONS:
     for seed in SUBMISSION_SEEDS:
         for method in METHODS_FULL:
-            f=f"{RES2}/{cond}_s{seed}/window_metrics_{method}.csv"
-            t=pd.read_csv(f)
-            # Compatibility with resumable runs produced before window 0 was
-            # formally marked as warm-up: never use it for inference even if
-            # an existing aggregate CSV still contains that row.
-            t=t[(t.window>=EVAL_START_W)&(t.window<VALID_W)]
+            directory=f"{RES2}/{cond}_s{seed}"
+            stream=pd.read_csv(f"{directory}/stream_metrics_{method}.csv")
+            clients=pd.read_csv(f"{directory}/client_metrics_{method}.csv")
+            clients=clients[(clients.window>=EVAL_START_W)&
+                            (clients.window<VALID_W)]
+            windows=pd.read_csv(f"{directory}/window_metrics_{method}.csv")
+            windows=windows[(windows.window>=EVAL_START_W)&
+                            (windows.window<VALID_W)]
+            valid=clients[np.isfinite(clients.auprc)].copy()
+            weighted=(np.average(valid.auprc,weights=valid.transactions)
+                      if len(valid) else np.nan)
             seed_rows.append(dict(
                 condition=cond,seed=seed,method=method,
-                auprc=t.auprc.mean(),
-                p_at_budget=t.p_at_budget.mean()))
+                auprc=stream.auprc.mean(),
+                ap_lift=stream.ap_lift.mean(),
+                p_at_budget=clients.p_at_budget.mean(),
+                window_macro_auprc=windows.auprc.mean(),
+                transaction_weighted_window_auprc=weighted))
 seed_df=pd.DataFrame(seed_rows)
 seed_df.to_csv(f"{RES2}/seed_summary.csv",index=False)
 
+SUMMARY_METRICS=("auprc","ap_lift","p_at_budget","window_macro_auprc",
+                 "transaction_weighted_window_auprc")
 summary_rows=[]
 for (cond,method),g in seed_df.groupby(["condition","method"]):
-    lo_a,hi_a=bootstrap_ci(g.auprc)
-    lo_p,hi_p=bootstrap_ci(g.p_at_budget)
-    summary_rows.append(dict(
-        condition=cond,method=method,n_seeds=len(g),
-        auprc_mean=g.auprc.mean(),auprc_std=g.auprc.std(ddof=1),
-        auprc_ci_lo=lo_a,auprc_ci_hi=hi_a,
-        p_at_budget_mean=g.p_at_budget.mean(),
-        p_at_budget_std=g.p_at_budget.std(ddof=1),
-        p_at_budget_ci_lo=lo_p,p_at_budget_ci_hi=hi_p))
+    row=dict(condition=cond,method=method,n_seeds=len(g))
+    for metric in SUMMARY_METRICS:
+        lo,hi=bootstrap_ci(g[metric])
+        row.update({f"{metric}_mean":g[metric].mean(),
+                    f"{metric}_std":g[metric].std(ddof=1),
+                    f"{metric}_ci_lo":lo,f"{metric}_ci_hi":hi})
+    summary_rows.append(row)
 summary_df=pd.DataFrame(summary_rows)
 summary_df.to_csv(f"{RES2}/method_summary.csv",index=False)
 
-tests=[]
-for cond in ("control","drift"):
-    ours=(seed_df[(seed_df.condition==cond)&(seed_df.method=="fedtypo")]
-          .set_index("seed"))
-    raw=[]
-    for baseline in [m for m in METHODS_FULL if m!="fedtypo"]:
-        other=(seed_df[(seed_df.condition==cond)&(seed_df.method==baseline)]
-               .set_index("seed"))
-        common=ours.index.intersection(other.index)
-        if len(common)<2:
-            stat,p=np.nan,1.0
-        else:
-            diff=(ours.loc[common,"auprc"]-other.loc[common,"auprc"]).to_numpy()
-            if np.allclose(diff,0):
-                stat,p=0.0,1.0
-            else:
-                stat,p=wilcoxon(ours.loc[common,"auprc"],
-                                other.loc[common,"auprc"],
-                                alternative="greater",method="auto")
-        raw.append((baseline,float(stat),float(p),len(common)))
-    order=np.argsort([x[2] for x in raw])
-    adjusted=np.empty(len(raw))
-    running=0.0
+def holm_adjust(p_values):
+    p=np.asarray(p_values,dtype=float)
+    if len(p)==0: return np.array([])
+    order=np.argsort(p); adjusted=np.empty(len(p)); running=0.0
     for rank,idx in enumerate(order):
-        candidate=min(1.0,(len(raw)-rank)*raw[idx][2])
-        running=max(running,candidate)
+        running=max(running,min(1.0,(len(p)-rank)*p[idx]))
         adjusted[idx]=running
-    for idx,(baseline,stat,p,n) in enumerate(raw):
-        ours_mean=ours.auprc.mean()
-        base_mean=(seed_df[(seed_df.condition==cond)&
-                           (seed_df.method==baseline)].auprc.mean())
-        tests.append(dict(condition=cond,baseline=baseline,n_seeds=n,
-                          statistic=stat,p_raw=p,p_holm=adjusted[idx],
-                          relative_gain=(ours_mean/base_mean-1)
-                                        if base_mean else np.nan))
-pd.DataFrame(tests).to_csv(f"{RES2}/seed_level_tests.csv",index=False)
+    return adjusted
+
+def signed_rank_effect(diff):
+    d=np.asarray(diff,dtype=float)
+    nonzero=d[~np.isclose(d,0.0)]
+    if len(nonzero)==0: return 0.0
+    ranks=rankdata(np.abs(nonzero),method="average")
+    pos=float(ranks[nonzero>0].sum()); neg=float(ranks[nonzero<0].sum())
+    return (pos-neg)/(pos+neg) if pos+neg else 0.0
+
+def signed_outcome_counts(diff):
+    """Return mutually exclusive positive, near-zero, and negative counts."""
+    d=np.asarray(diff,dtype=float)
+    ties=np.isclose(d,0.0)
+    return (int(((d>0)&~ties).sum()),int(ties.sum()),
+            int(((d<0)&~ties).sum()))
+
+def paired_family(reference,comparisons,condition,metric="auprc"):
+    ref=(seed_df[(seed_df.condition==condition)&
+                 (seed_df.method==reference)].set_index("seed"))
+    rows=[]; differences=[]
+    for comparison in comparisons:
+        other=(seed_df[(seed_df.condition==condition)&
+                       (seed_df.method==comparison)].set_index("seed"))
+        common=ref.index.intersection(other.index)
+        diff=(ref.loc[common,metric]-other.loc[common,metric]).to_numpy(dtype=float)
+        if len(diff)<2 or np.allclose(diff,0):
+            stat,p=0.0,1.0
+        else:
+            stat,p=wilcoxon(diff,alternative="two-sided",method="auto")
+        lo,hi=bootstrap_ci(diff)
+        sd=np.std(diff,ddof=1) if len(diff)>1 else np.nan
+        wins,ties,losses=signed_outcome_counts(diff)
+        rows.append(dict(condition=condition,reference=reference,
+                         comparison=comparison,metric=metric,n_seeds=len(common),
+                         statistic=float(stat),p_raw=float(p),
+                         mean_difference=float(np.mean(diff)) if len(diff) else np.nan,
+                         difference_ci_lo=lo,difference_ci_hi=hi,
+                         median_difference=float(np.median(diff)) if len(diff) else np.nan,
+                         cohen_dz=(float(np.mean(diff)/sd)
+                                   if np.isfinite(sd) and sd>0 else np.nan),
+                         rank_biserial=signed_rank_effect(diff),
+                         wins=wins,ties=ties,losses=losses,
+                         relative_gain=(float(ref.loc[common,metric].mean()/
+                                              other.loc[common,metric].mean()-1)
+                                        if len(common) and
+                                           other.loc[common,metric].mean()!=0
+                                        else np.nan)))
+        for seed_id_value,delta in zip(common,diff):
+            differences.append(dict(condition=condition,reference=reference,
+                                    comparison=comparison,metric=metric,
+                                    seed=int(seed_id_value),difference=float(delta)))
+    adjusted=holm_adjust([row["p_raw"] for row in rows])
+    for row,p_holm in zip(rows,adjusted): row["p_holm"]=float(p_holm)
+    return rows,differences
+
+primary_tests=[]; paired_differences=[]
+for cond in CONDITIONS:
+    comparisons=[m for m in PRIMARY_METHODS
+                 if m in METHODS_FULL and m!="fedtypo"]
+    if "fedtypo" in METHODS_FULL and comparisons:
+        rows,diffs=paired_family("fedtypo",comparisons,cond)
+        primary_tests.extend(rows); paired_differences.extend(diffs)
+primary_tests_df=pd.DataFrame(primary_tests)
+primary_tests_df.to_csv(f"{RES2}/seed_level_tests.csv",index=False)
+pd.DataFrame(paired_differences).to_csv(
+    f"{RES2}/paired_differences.csv",index=False)
+
+ablation_tests=[]; ablation_differences=[]
+for cond in CONDITIONS:
+    comparisons=[m for m in ABLATION_METHODS if m in METHODS_FULL]
+    if "fedtypo_noreg" in METHODS_FULL and comparisons:
+        rows,diffs=paired_family("fedtypo_noreg",comparisons,cond)
+        ablation_tests.extend(rows); ablation_differences.extend(diffs)
+pd.DataFrame(ablation_tests).to_csv(f"{RES2}/ablation_tests.csv",index=False)
+pd.DataFrame(ablation_differences).to_csv(
+    f"{RES2}/ablation_paired_differences.csv",index=False)
+
+mechanism_rows=[]
+if "drift" in CONDITIONS and {"fedtypo","fedtypo_noreg"}.issubset(METHODS_FULL):
+    for horizon in (1,3,-1):
+        values={"fedtypo":{},"fedtypo_noreg":{}}
+        for seed in SUBMISSION_SEEDS:
+            for method in values:
+                path=f"{RES2}/drift_s{seed}/inoculation_{method}.csv"
+                frame=pd.read_csv(path)
+                frame=frame[frame.horizon_windows==horizon]
+                values[method][seed]=frame.capture_rate.mean()
+        common=sorted(set(values["fedtypo"])&set(values["fedtypo_noreg"]))
+        diff=np.array([values["fedtypo"][s]-values["fedtypo_noreg"][s]
+                       for s in common],dtype=float)
+        finite=np.isfinite(diff); diff=diff[finite]
+        if len(diff)<2 or np.allclose(diff,0): stat,p=0.0,1.0
+        else: stat,p=wilcoxon(diff,alternative="two-sided",method="auto")
+        lo,hi=bootstrap_ci(diff)
+        wins,ties,losses=signed_outcome_counts(diff)
+        mechanism_rows.append(dict(horizon_windows=horizon,n_seeds=len(diff),
+                                   statistic=float(stat),p_raw=float(p),
+                                   mean_difference=(float(diff.mean())
+                                                    if len(diff) else np.nan),
+                                   difference_ci_lo=lo,difference_ci_hi=hi,
+                                   rank_biserial=signed_rank_effect(diff),
+                                   wins=wins,ties=ties,losses=losses))
+    adjusted=holm_adjust([row["p_raw"] for row in mechanism_rows])
+    for row,p_holm in zip(mechanism_rows,adjusted): row["p_holm"]=float(p_holm)
+pd.DataFrame(mechanism_rows).to_csv(f"{RES2}/mechanism_tests.csv",index=False)
 
 print(summary_df.to_string(index=False))
-print(pd.DataFrame(tests).to_string(index=False))
+if len(primary_tests_df): print(primary_tests_df.to_string(index=False))

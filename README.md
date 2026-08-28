@@ -1,39 +1,56 @@
 # FedTypo
 
-Official implementation and reproducibility artifact for **FedTypo: Typology-Aware Federated Anti-Money-Laundering Detection Under Heterogeneity, Concept Drift, and Delayed Labels**.
+Official implementation and reproducibility artifact for **FedTypo:
+Prototype-Guided Federated Anti-Money-Laundering Detection Under
+Heterogeneity, Concept Drift, and Delayed Labels**.
 
-FedTypo is a cross-silo temporal graph-learning method for anti-money-laundering detection. Confirmed-positive transaction embeddings form compact typology prototypes. Prototype-set similarity guides client grouping for federated aggregation, while delayed prototype novelty controls a de-duplicated registry for cross-institution typology transfer.
+FedTypo is a cross-silo temporal graph-ranking method. Confirmed-positive
+transaction embeddings form compact behavioral prototypes; prototype-set
+similarity guides grouped federated aggregation, while a delayed novelty gate
+controls an optional de-duplicated registry. The revised experiments support a
+stream-level ranking effect but do **not** isolate the registry as a reliable
+early-transfer mechanism.
 
-This repository contains the experiment implementation, the compact outputs from all reported runs, the exact software and hardware records, and the scripts used to regenerate the paper figures and numerical LaTeX macros. Raw transaction-level predictions and third-party datasets are not redistributed.
+The repository contains the exact executed experiment source, the corrected
+current source, compact outputs from all reported runs, environment/provenance
+records, and deterministic paper-asset generation. Third-party datasets and
+raw transaction predictions are not redistributed.
 
 ## Repository layout
 
 | Path | Contents |
 |---|---|
-| `experiments/run_submission.py` | Canonical IBM AMLworld and SAML-D experiment |
-| `scripts/run_experiment.py` | Command-line entry point |
-| `scripts/make_submission_assets.py` | Figure and LaTeX-macro generation |
-| `scripts/validate_release.py` | Integrity and completeness checks |
-| `results/` | Ten-seed compact results for both datasets |
-| `artifacts/figures/` | Vector figures generated from the committed results |
-| `artifacts/results_auto.tex` | Numerical macros generated from the committed results |
-| `data/README.md` | Dataset acquisition, layout, and checksums |
-| `docs/REPRODUCIBILITY.md` | Protocol, environment, and expected outputs |
-| `docs/RESULTS.md` | Expected aggregate results and interpretation |
+| `experiments/run_submission_executed_201bf0f.py` | Exact source used for the four reported result roots |
+| `experiments/run_submission.py` | Current source with mutually exclusive inference tie counts |
+| `scripts/fix_inference_tie_counts.py` | Audited postprocessor applied only to win/tie/loss counts |
+| `scripts/run_experiment.py` | Command-line experiment entry point |
+| `scripts/make_submission_assets.py` | Figure and LaTeX-macro generator |
+| `scripts/validate_release.py` | Standard-library integrity/completeness validator |
+| `results/` | Two primary account-hash and two typology-skew sensitivity roots |
+| `artifacts/figures/` | Six generated vector figures |
+| `artifacts/results_auto.tex` | Generated numerical LaTeX macros |
+| `artifacts/manuscript.pdf` | Revised ten-page manuscript |
+| `docs/REPRODUCIBILITY.md` | Protocol, environment, provenance, and workflow |
+| `docs/RESULTS.md` | Evidence-constrained result summary |
 
-## Verify the artifact
+## Verify the release
 
-The validation script uses only the Python standard library.
+The release validator uses only the Python standard library:
 
 ```bash
 python scripts/validate_release.py
 ```
 
-It verifies the canonical source hash, both environment records, the complete control and drift seed matrix, all seven methods, aggregate tables, and the absence of raw predictions.
+It verifies the executed-source and postprocessor hashes, dataset/partition
+metadata, ten seeds, both conditions, expected method matrices, required
+per-run files, finite consolidated CSVs, postprocessing manifests, generated
+assets, and absence of raw predictions or old result roots.
 
 ## Install
 
-Python 3.13.5 was used for the reported experiments. Create an isolated environment and install the pinned dependencies:
+The reported GPU runs used Python 3.13.5, PyTorch 2.9.0 with CUDA 12.8, and an
+NVIDIA GeForce RTX 3060. Create an isolated environment and install the pinned
+dependencies:
 
 ```bash
 python -m venv .venv
@@ -42,17 +59,13 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-On Windows PowerShell, activate the environment with:
+On Windows PowerShell, activate with `.venv\Scripts\Activate.ps1`. Install a
+PyTorch build appropriate for the target CPU/CUDA platform if the default
+wheel is unsuitable.
 
-```powershell
-.venv\Scripts\Activate.ps1
-```
+## Prepare the datasets
 
-The reported runs used PyTorch 2.9.0 with CUDA 12.8 on an NVIDIA GeForce RTX 3060. Install the PyTorch build appropriate for the target CUDA or CPU platform if the default package does not match it.
-
-## Prepare the data
-
-Download the datasets from their original distribution pages and arrange one of the following layouts:
+Download the public datasets from their original distributors and arrange:
 
 ```text
 data/ibm/
@@ -63,47 +76,69 @@ data/samld/
   SAML-D.csv
 ```
 
-The expected file hashes and source links are listed in [`data/README.md`](data/README.md). The loader stops with an error when a required input is missing.
+Expected filenames, byte sizes, and SHA-256 values are recorded in each
+result root's `environment.json` and summarized in `data/README.md`.
 
-## Run the experiments
+## Run experiments
 
-A fast integration run uses a reduced input subset and one seed:
-
-```bash
-python scripts/run_experiment.py --dataset ibm --data-root data/ibm --output-root outputs --fast-dev
-```
-
-The reported ten-seed runs use seeds 42 through 51:
+The primary partition is label-independent source-account hashing:
 
 ```bash
-python scripts/run_experiment.py --dataset ibm --data-root data/ibm --output-root outputs --seeds 10
-python scripts/run_experiment.py --dataset samld --data-root data/samld --output-root outputs --seeds 10
+python scripts/run_experiment.py \
+  --dataset ibm --partition account_hash \
+  --data-root data/ibm --output-root outputs --seeds 10
+
+python scripts/run_experiment.py \
+  --dataset samld --partition account_hash \
+  --data-root data/samld --output-root outputs --seeds 10
 ```
 
-Runs are resumable. A completed method is skipped when its output directory contains the corresponding `DONE_<method>` marker. Transaction-level predictions are disabled by default because the paper figures and tables use compact client/window summaries.
+The outcome-conditioned, transductive `typology_skew` partition is a secondary
+sensitivity only. To reproduce its reduced three-method matrix:
 
-## Regenerate the paper assets
+```bash
+python scripts/run_experiment.py \
+  --dataset ibm --partition typology_skew \
+  --methods fedavg,fedtypo_noreg,fedtypo \
+  --run-name tifs_revision_partition_sensitivity \
+  --data-root data/ibm --output-root outputs --seeds 10
+```
+
+A fast time-stratified integration run adds `--fast-dev`. Runs are resumable;
+completed method directories contain `DONE_<method>` markers. Raw prediction
+retention is disabled by default.
+
+## Regenerate manuscript assets
 
 ```bash
 python scripts/make_submission_assets.py \
-  --ibm results/tifs_submission_v2_ibm \
-  --samld results/tifs_submission_v2_samld \
+  --ibm results/tifs_revision_v1_ibm_account_hash \
+  --samld results/tifs_revision_v1_samld_account_hash \
+  --ibm-secondary results/tifs_revision_partition_sensitivity_ibm_typology_skew \
+  --samld-secondary results/tifs_revision_partition_sensitivity_samld_typology_skew \
   --figdir reproduced/figures \
   --tex reproduced/results_auto.tex
 ```
 
-This produces the architecture, main-results, budget-sensitivity, and prototype-fidelity figures from the committed CSV files.
+The builder validates all four roots before writing assets. See
+`docs/REPRODUCIBILITY.md` for the provenance distinction between the executed
+source and the tie-count-only postprocessing step.
 
-## Reproducibility scope
+## Interpretation boundary
 
-The artifact is organized around the [IEEE TIFS reproducible-research guidance](https://signalprocessingsociety.org/publications-resources/ieee-transactions-information-forensics-and-security/ieee-transactions). It supports the IBM AMLworld and SAML-D control and injected-drift experiments, seven methods, ten independent seeds, client-macro metrics, budget sensitivity, prototype fidelity, and seed-level Wilcoxon tests with Holm correction. The datasets remain under their original terms and must be obtained from their publishers.
+The primary endpoint is stream-level client-macro AUPRC: evaluated-window
+predictions are concatenated within each client before average precision is
+computed and macro-averaged across clients. P@50 is secondary. FedTypo improves
+primary AUPRC consistently on IBM and selectively under SAML-D drift, while
+Local is strongest at P@50. Registry recovery is essentially null, no
+component ablation survives Holm correction, and IBM prototype fidelity is
+weak. See `docs/RESULTS.md` for exact values and limitations.
 
-The threat model is an honest-but-curious server with protocol-compliant clients. Raw transaction records remain local. Model parameters and typology prototypes do not constitute a formal privacy guarantee.
+Raw records remain local, but data locality is not differential privacy,
+secure aggregation, or Byzantine robustness.
 
-## Citation
+## Citation and license
 
-Citation metadata is provided in [`CITATION.cff`](CITATION.cff). Add the final journal DOI and publication details after acceptance.
-
-## License
-
-The code is available under the [MIT License](LICENSE). Dataset licenses and publication rights are separate and remain with their respective owners.
+Citation metadata is in `CITATION.cff`. Add final journal DOI/publication
+details after acceptance. Code is available under the MIT License; dataset
+licenses and publication rights remain with their distributors.

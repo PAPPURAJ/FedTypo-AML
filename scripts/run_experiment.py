@@ -19,9 +19,24 @@ def main() -> None:
         description="Run the FedTypo submission experiment."
     )
     parser.add_argument("--dataset", choices=("ibm", "samld"), required=True)
+    parser.add_argument(
+        "--partition",
+        choices=("account_hash", "typology_skew"),
+        default="account_hash",
+    )
     parser.add_argument("--data-root", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, default=Path("outputs"))
     parser.add_argument("--seeds", type=positive_integer, default=10)
+    parser.add_argument("--methods", help="comma-separated method identifiers")
+    parser.add_argument(
+        "--conditions", default="control,drift", help="control, drift, or both"
+    )
+    parser.add_argument("--run-name", default="tifs_revision_v1")
+    parser.add_argument(
+        "--optimizer-policy",
+        choices=("per_round", "broadcast_only"),
+        default="per_round",
+    )
     parser.add_argument("--fast-dev", action="store_true")
     parser.add_argument("--save-predictions", action="store_true")
     args = parser.parse_args()
@@ -33,8 +48,16 @@ def main() -> None:
     output_root.mkdir(parents=True, exist_ok=True)
 
     os.environ["FT_DATASET"] = args.dataset
+    os.environ["FT_PARTITION"] = args.partition
     os.environ["FT_OUT"] = str(output_root)
     os.environ["FT_N_SEEDS"] = str(args.seeds)
+    os.environ["FT_CONDITIONS"] = args.conditions
+    os.environ["FT_RUN_NAME"] = args.run_name
+    os.environ["FT_OPTIMIZER_POLICY"] = args.optimizer_policy
+    if args.methods:
+        os.environ["FT_METHODS"] = args.methods
+    else:
+        os.environ.pop("FT_METHODS", None)
     os.environ["FT_FAST_DEV"] = "1" if args.fast_dev else "0"
     os.environ["FT_SAVE_PREDICTIONS"] = "1" if args.save_predictions else "0"
     if args.dataset == "ibm":

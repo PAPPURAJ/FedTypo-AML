@@ -1,0 +1,29 @@
+{
+  "timestamp_utc": "2026-08-27T14:36:48.437925+00:00",
+  "reason": "make win/tie/loss categories mutually exclusive under np.isclose",
+  "training_script_sha256": "201bf0fbb7a4f4082ffd5563dc2773d6a752ff0cf9e23351da09be86fc3b587d",
+  "postprocessor_sha256": "dd6b421251231ab0fac66c49e0723f37371afd977df9912ec8cd91f42192d496",
+  "changed": {
+    "seed_level_tests.csv": true,
+    "ablation_tests.csv": true,
+    "mechanism_tests.csv": true
+  },
+  "before_sha256": {
+    "seed_level_tests.csv": "a5b7270a5a0e813aa4ca32b08783350c863c162e36e68e12b2800b2972261e43",
+    "ablation_tests.csv": "fa0d91ecbda77b7bbabff6f1a1ebb7dfbcc4c6d16a67745261a951e257c87ca7",
+    "mechanism_tests.csv": "a7bc53b8f467b40e332fe8501929fd97a87c18ed65f4fdd2152ee7d9b103a045"
+  },
+  "after_sha256": {
+    "seed_level_tests.csv": "d060680f1215f5c4db4320a0646438021e4d2187424995f3fab4b0e459fffe83",
+    "ablation_tests.csv": "f4b91ff248262d83fc92d90ea0acfe1d3c08254499b9714a036828bb3ec4058c",
+    "mechanism_tests.csv": "48ca5c9f8c7225bc476969687771204277940ca244f78f20873bc06c74693671"
+  },
+  "unchanged_fields": [
+    "model outputs",
+    "seed metrics",
+    "paired differences",
+    "p-values",
+    "confidence intervals",
+    "effect sizes"
+  ]
+}

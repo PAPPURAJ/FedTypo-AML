@@ -1,36 +1,28 @@
-# Result artifact
+# Compact revised result artifact
 
-The committed result tree contains compact outputs from the complete experiments reported in the paper. It includes no raw transactions and no transaction-level prediction files.
-
-## Structure
+The committed tree contains four complete ten-seed result roots and no raw
+transactions or transaction-level predictions:
 
 ```text
 results/
-  tifs_submission_v2_ibm/
-  tifs_submission_v2_samld/
+  tifs_revision_v1_ibm_account_hash/
+  tifs_revision_v1_samld_account_hash/
+  tifs_revision_partition_sensitivity_ibm_typology_skew/
+  tifs_revision_partition_sensitivity_samld_typology_skew/
 ```
 
-Each dataset root contains:
+The `account_hash` roots are primary and contain seven methods plus six
+component ablations. The `typology_skew` roots are secondary, transductive,
+outcome-conditioned sensitivities containing FedAvg, FedTypo-NoReg, and
+FedTypo.
 
-| File | Description |
-|---|---|
-| `environment.json` | Input hashes, software versions, device, seeds, and protocol configuration |
-| `seed_summary.csv` | One AUPRC and precision-at-budget record per condition, seed, and method |
-| `method_summary.csv` | Ten-seed mean, standard deviation, and bootstrap confidence interval |
-| `seed_level_tests.csv` | Paired one-sided Wilcoxon tests and Holm-adjusted values |
+Each root contains environment/input/source provenance, raw window support,
+seed and method summaries, two-sided paired inference, paired differences,
+component-ablation inference, mechanism tests, and a tie-count postprocessing
+audit manifest. Each `control_s<seed>` and `drift_s<seed>` directory contains
+the relevant client, window, stream, budget, typology, prototype, registry,
+inoculation, support, and event summaries plus `DONE_<method>` markers.
 
-Each `control_s<seed>` or `drift_s<seed>` directory contains client, window, budget, typology, prototype, and inoculation summaries. Registry summaries are present when the run admitted registry entries. Drift directories also contain the injected event schedule.
-
-## Methods
-
-The seven evaluated methods are:
-
-- `local_only`
-- `fedavg`
-- `fedprox`
-- `fedproto`
-- `cda_fedavg`
-- `fedtypo_noreg`
-- `fedtypo`
-
-Seeds 42 through 51 are present for both control and injected-drift conditions on both datasets.
+Seeds 42–51 and both conditions are present. Run
+`python scripts/validate_release.py` from the repository root to verify the
+complete matrix and provenance hashes.

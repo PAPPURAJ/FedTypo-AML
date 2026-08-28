@@ -1,0 +1,114 @@
+{
+  "dataset": "ibm",
+  "inputs": [
+    {
+      "role": "transactions",
+      "file": "HI-Small_Trans.csv",
+      "bytes": 475664283,
+      "sha256": "b19d39f515523373f991b689c07e11e7b0b95c17a2c27a87d91584ae16c5b040"
+    },
+    {
+      "role": "patterns",
+      "file": "HI-Small_Patterns.txt",
+      "bytes": 323844,
+      "sha256": "2c546b5ce6009e73851f0139af053cf845f08bf92f3bc82fe1eb937dec2ef39b"
+    }
+  ],
+  "script_sha256": "201bf0fbb7a4f4082ffd5563dc2773d6a752ff0cf9e23351da09be86fc3b587d",
+  "seeds": [
+    42,
+    43,
+    44,
+    45,
+    46,
+    47,
+    48,
+    49,
+    50,
+    51
+  ],
+  "conditions": [
+    "control",
+    "drift"
+  ],
+  "methods": [
+    "local_only",
+    "fedavg",
+    "fedprox",
+    "fedproto",
+    "fedtypo_noreg",
+    "fedtypo",
+    "cda_fedavg",
+    "ablate_g1",
+    "ablate_g3",
+    "ablate_random",
+    "ablate_nommd",
+    "ablate_samplewt",
+    "ablate_rho0"
+  ],
+  "python": "3.13.5 | packaged by Anaconda, Inc. | (main, Jun 12 2025, 16:09:02) [GCC 11.2.0]",
+  "torch": "2.9.0+cu128",
+  "cuda": "12.8",
+  "numpy": "2.5.1",
+  "pandas": "3.0.1",
+  "sklearn": "1.7.2",
+  "scipy": "1.18.0",
+  "networkx": "3.5",
+  "device": "NVIDIA GeForce RTX 3060",
+  "config": {
+    "clients": 5,
+    "dimension": 64,
+    "natural_windows": 18,
+    "supported_windows": 10,
+    "evaluation_start_window": 1,
+    "evaluation_end_window_exclusive": 10,
+    "partition_mode": "account_hash",
+    "optimizer_policy": "per_round",
+    "window_support_rule": {
+      "full_windows": 18,
+      "supported_windows": 10,
+      "median_window_transactions": 207406.0,
+      "minimum_supported_transactions": 2075,
+      "full_transactions": 5078345,
+      "retained_transactions": 5077237,
+      "trimmed_transactions": 1108,
+      "retained_fraction": 0.9997818186830552,
+      "retained_window_ids": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
+      ],
+      "excluded_window_ids": [
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17
+      ]
+    },
+    "window_frequency": "24h",
+    "local_epochs": 1,
+    "learning_rate": 0.002,
+    "focal_gamma": 2.0,
+    "alert_tpr": 0.6,
+    "alert_fpr": 0.01,
+    "delay_median_cycles": 3,
+    "max_prototypes": 4,
+    "min_confirmed_positive": 8,
+    "rho": 0.2,
+    "registry_beta": 0.15,
+    "novelty_gate": 0.3,
+    "fedproto_mu": 0.1,
+    "budget": 50
+  }
+}

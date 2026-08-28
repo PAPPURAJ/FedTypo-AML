@@ -1,15 +1,19 @@
-# Generated artifacts
+# Generated manuscript artifacts
 
-The vector figures and numerical LaTeX macros in this directory were built from the committed CSV results.
+This directory contains the revised manuscript PDF, six vector figures, and
+generated LaTeX macros built from the four validated result roots.
 
 Regenerate them with:
 
 ```bash
 python scripts/make_submission_assets.py \
-  --ibm results/tifs_submission_v2_ibm \
-  --samld results/tifs_submission_v2_samld \
+  --ibm results/tifs_revision_v1_ibm_account_hash \
+  --samld results/tifs_revision_v1_samld_account_hash \
+  --ibm-secondary results/tifs_revision_partition_sensitivity_ibm_typology_skew \
+  --samld-secondary results/tifs_revision_partition_sensitivity_samld_typology_skew \
   --figdir reproduced/figures \
   --tex reproduced/results_auto.tex
 ```
 
-The command validates both result roots before writing any assets.
+The builder validates the roots before writing assets. `results_auto.tex` is
+generated and must not be edited manually.

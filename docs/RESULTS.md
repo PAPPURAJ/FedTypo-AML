@@ -1,42 +1,55 @@
-# Expected results
+# Validated revised results
 
-The tables below provide a compact result-level check for a complete reproduction. Values are client-macro AUPRC means across ten independent seeds. Full precision-at-budget statistics, standard deviations, bootstrap intervals, and seed-level tests are available in each dataset's `method_summary.csv` and `seed_level_tests.csv`.
+The primary endpoint is stream-level client-macro AUPRC. Values below are
+means across ten paired seeds under the label-independent `account_hash`
+partition. Full bootstrap intervals, raw and Holm-adjusted p-values, paired
+differences, rank-biserial effects, P@50/budget summaries, and per-seed records
+are committed in the result roots and generated manuscript.
 
-## IBM AMLworld HI-Small
+## Primary account-hash results
 
-| Method | Control | Injected drift |
-|---|---:|---:|
-| Local-only | 0.3056 | 0.3487 |
-| FedAvg | 0.4043 | 0.4206 |
-| FedProx | 0.3986 | 0.4219 |
-| FedProto | 0.2698 | 0.3322 |
-| CDA-FedAvg | 0.3977 | 0.4197 |
-| FedTypo-NoReg | 0.4044 | 0.4233 |
-| FedTypo | 0.4251 | 0.4377 |
+| Dataset/condition | Local | FedAvg | FedProto | FedTypo-NoReg | FedTypo |
+|---|---:|---:|---:|---:|---:|
+| IBM control | 0.0013 | 0.0013 | 0.0012 | 0.0013 | **0.0036** |
+| IBM drift | 0.0013 | 0.0013 | 0.0012 | 0.0013 | **0.0037** |
+| SAML-D control | **0.0016** | 0.0013 | 0.0013 | 0.0013 | 0.0015 |
+| SAML-D drift | 0.0018 | 0.0013 | 0.0017 | 0.0013 | **0.0020** |
 
-For the paired one-sided comparison with FedAvg, FedTypo has Holm-adjusted `p = 0.005859375` in both conditions. Under injected drift, its relative AUPRC gain over FedAvg is 4.07%.
+On IBM, FedTypo wins all ten paired seeds against every baseline in both
+conditions; each six-comparison Holm-adjusted value is 0.012. On SAML-D
+control, no comparison is significant. Under SAML-D drift, FedTypo is higher
+than FedAvg (`p_H=0.020`), FedProx (`0.012`), CDA-FedAvg (`0.020`), and
+FedTypo-NoReg (`0.023`), but not Local or FedProto (both `0.387`).
 
-## SAML-D
+The secondary P@50 endpoint does not reproduce the AUPRC ordering. Local has
+the highest mean P@50 in both primary datasets and conditions relevant to the
+headline comparisons (IBM control 0.0142, IBM drift 0.0143, SAML-D control
+0.0336, SAML-D drift 0.0316).
 
-| Method | Control | Injected drift |
-|---|---:|---:|
-| Local-only | 0.0232 | 0.0151 |
-| FedAvg | 0.0453 | 0.0308 |
-| FedProx | 0.0443 | 0.0308 |
-| FedProto | 0.0272 | 0.0203 |
-| CDA-FedAvg | 0.0453 | 0.0307 |
-| FedTypo-NoReg | 0.0451 | 0.0320 |
-| FedTypo | 0.0453 | 0.0301 |
+## Mechanism boundary
 
-SAML-D is a transfer check rather than a second confirmatory result. FedTypo does not improve over FedAvg in the injected-drift aggregate; the Holm-adjusted comparison is `p = 1.0`. This dataset-dependent behavior is part of the reported result.
+- **Registry:** IBM one- and three-window post-onset differences are exactly
+  zero in every seed. Over all post-onset windows the registry recovers one
+  additional target transaction across 1,731 event-positive records (one win,
+  nine ties; `p_H=1.0`). SAML-D recovers zero for both variants across 5,851
+  records at every horizon.
+- **Component ablations:** none of 24 comparisons with FedTypo-NoReg survives
+  Holm correction; the smallest adjusted value is 0.504.
+- **Prototype fidelity:** IBM is weak (named-only purity/NMI/ARI about
+  0.25/0.05–0.06/0.02 and negative cosine gap). SAML-D is moderate (ARI about
+  0.17–0.19 and positive cosine gap).
+- **CDA control:** FedAvg and the window-adapted CDA-FedAvg are identical for
+  every seed, condition, dataset, and reported metric, so the control was
+  inactive or behaviorally equivalent under this protocol.
 
-## Regeneration check
+These diagnostics support a conditional ranking result, not named-typology
+recovery or a validated early cross-institution registry mechanism.
 
-After a full rerun, compare the new aggregate CSV files with:
+## Partition sensitivity
 
-```text
-results/tifs_submission_v2_ibm/
-results/tifs_submission_v2_samld/
-```
-
-Then generate the figures and compare their trends, method ordering, confidence intervals, and reported statistical conclusions with `artifacts/figures/`.
+The `typology_skew` sensitivity uses full-graph Louvain communities and
+typology-conditioned reassignment. It produces substantially larger apparent
+effects (FedTypo AUPRC: IBM 0.0087/0.0083 control/drift; SAML-D
+0.0065/0.0079). Because it is transductive and outcome-conditioned, it is not
+used for primary inference and must not be interpreted as natural bank
+boundaries.

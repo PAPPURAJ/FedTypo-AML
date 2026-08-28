@@ -1,6 +1,6 @@
 cff-version: 1.2.0
 message: "If you use this software, please cite the accompanying paper."
-title: "FedTypo: Typology-Aware Federated Anti-Money-Laundering Detection"
+title: "FedTypo: Prototype-Guided Federated Anti-Money-Laundering Detection Under Heterogeneity, Concept Drift, and Delayed Labels"
 type: software
 authors:
   - family-names: Bhottacharjee
@@ -9,7 +9,7 @@ authors:
     given-names: Durjoy
   - family-names: Bhattacharjee
     given-names: Ritu
-version: 1.0.0
+version: 2.0.0
 license: MIT
 keywords:
   - anti-money laundering
@@ -17,3 +17,4 @@ keywords:
   - graph learning
   - concept drift
   - delayed labels
+  - behavioral prototypes

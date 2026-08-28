@@ -1,0 +1,98 @@
+{
+  "dataset": "samld",
+  "inputs": [
+    {
+      "role": "transactions",
+      "file": "SAML-D.csv",
+      "bytes": 996168850,
+      "sha256": "5b71ce2ea7b47fe6f19da1aa151776b04ec74560a852c2c077df91d20b8b4ef9"
+    }
+  ],
+  "script_sha256": "201bf0fbb7a4f4082ffd5563dc2773d6a752ff0cf9e23351da09be86fc3b587d",
+  "seeds": [
+    42,
+    43,
+    44,
+    45,
+    46,
+    47,
+    48,
+    49,
+    50,
+    51
+  ],
+  "conditions": [
+    "control",
+    "drift"
+  ],
+  "methods": [
+    "fedavg",
+    "fedtypo_noreg",
+    "fedtypo"
+  ],
+  "python": "3.13.5 | packaged by Anaconda, Inc. | (main, Jun 12 2025, 16:09:02) [GCC 11.2.0]",
+  "torch": "2.9.0+cu128",
+  "cuda": "12.8",
+  "numpy": "2.5.1",
+  "pandas": "3.0.1",
+  "sklearn": "1.7.2",
+  "scipy": "1.18.0",
+  "networkx": "3.5",
+  "device": "NVIDIA GeForce RTX 3060",
+  "config": {
+    "clients": 5,
+    "dimension": 64,
+    "natural_windows": 19,
+    "supported_windows": 19,
+    "evaluation_start_window": 1,
+    "evaluation_end_window_exclusive": 19,
+    "partition_mode": "typology_skew",
+    "optimizer_policy": "per_round",
+    "window_support_rule": {
+      "full_windows": 19,
+      "supported_windows": 19,
+      "median_window_transactions": 500430.0,
+      "minimum_supported_transactions": 5005,
+      "full_transactions": 9504852,
+      "retained_transactions": 9504852,
+      "trimmed_transactions": 0,
+      "retained_fraction": 1.0,
+      "retained_window_ids": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18
+      ],
+      "excluded_window_ids": []
+    },
+    "window_frequency": "17D",
+    "local_epochs": 1,
+    "learning_rate": 0.002,
+    "focal_gamma": 2.0,
+    "alert_tpr": 0.6,
+    "alert_fpr": 0.01,
+    "delay_median_cycles": 3,
+    "max_prototypes": 4,
+    "min_confirmed_positive": 8,
+    "rho": 0.2,
+    "registry_beta": 0.15,
+    "novelty_gate": 0.3,
+    "fedproto_mu": 0.1,
+    "budget": 50
+  }
+}

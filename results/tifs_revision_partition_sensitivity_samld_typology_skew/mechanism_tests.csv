@@ -1,0 +1,4 @@
+horizon_windows,n_seeds,statistic,p_raw,mean_difference,difference_ci_lo,difference_ci_hi,rank_biserial,wins,ties,losses,p_holm
+1,10,0.0,1.0,0.0,0.0,0.0,0.0,0,10,0,1.0
+3,10,0.0,1.0,0.0,0.0,0.0,0.0,0,10,0,1.0
+-1,10,0.0,1.0,0.0,0.0,0.0,0.0,0,10,0,1.0
