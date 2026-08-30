@@ -2,7 +2,8 @@
 
 ## Provenance chain
 
-The four result roots identify the exact executed source by SHA-256:
+The four primary and partition-sensitivity roots identify the exact executed
+source by SHA-256:
 
 ```text
 201bf0fbb7a4f4082ffd5563dc2773d6a752ff0cf9e23351da09be86fc3b587d
@@ -20,8 +21,14 @@ fields in `postprocess_inference_counts.json`. Model outputs, seed metrics,
 p-values, confidence intervals, and effect sizes were unchanged.
 
 `experiments/run_submission.py` is the current source with the tie-count rule
-fixed at generation time. The release validator checks the complete chain
-rather than claiming that the current-source hash produced the archived runs.
+fixed at generation time. It also emits shared-trajectory registry-beta
+metrics. The fifth root,
+`tifs_registry_beta_rtx3060_v1_samld_account_hash`, records current-source
+SHA-256
+`6c63628be2b7e17e827fad7482d70006d43856e999fff5f87fda1c5596bf3981`.
+At the preselected beta 0.15, all six metric families across both conditions
+and ten seeds are byte-identical to the original primary SAML-D FedTypo files
+(120 checks). The release validator checks both provenance paths.
 
 ## Reported environment
 
@@ -43,15 +50,15 @@ each result root's `environment.json`.
 
 ## Experimental matrix
 
-| Dimension | Primary evaluation | Partition sensitivity |
-|---|---|---|
-| Datasets | IBM AMLworld HI-Small; SAML-D | IBM AMLworld HI-Small; SAML-D |
-| Partition | `account_hash` | `typology_skew` |
-| Status | Primary, label-independent | Secondary, transductive and outcome-conditioned |
-| Conditions | Natural control; controlled drift | Natural control; controlled drift |
-| Seeds | 42–51 | 42–51 |
-| Methods | 7 comparators/methods + 6 component ablations | FedAvg, FedTypo-NoReg, FedTypo |
-| Optimizer policy | One local epoch, Adam reset per window for every method | Same |
+| Dimension | Primary evaluation | Partition sensitivity | Registry-beta sensitivity |
+|---|---|---|---|
+| Datasets | IBM AMLworld HI-Small; SAML-D | IBM AMLworld HI-Small; SAML-D | SAML-D |
+| Partition | `account_hash` | `typology_skew` | `account_hash` |
+| Status | Primary, label-independent | Secondary, transductive and outcome-conditioned | Post hoc shared-trajectory re-scoring |
+| Conditions | Natural control; controlled drift | Natural control; controlled drift | Same |
+| Seeds | 42–51 | 42–51 | 42–51 |
+| Methods | 7 comparators/methods + 6 component ablations | FedAvg, FedTypo-NoReg, FedTypo | FedTypo at six beta values |
+| Optimizer policy | One local epoch, Adam reset per window for every method | Same | Same trained trajectory per seed/condition |
 
 IBM has 18 natural windows. The label-independent support rule retains windows
 0–9, uses window 0 as warm-up, evaluates 1–9, and excludes 1,108 transactions
@@ -73,8 +80,10 @@ dataset-condition family.
 5. Execute the primary matrices with `--partition account_hash`.
 6. Execute the reduced sensitivity matrices with `--partition typology_skew`
    and `--methods fedavg,fedtypo_noreg,fedtypo`.
-7. Regenerate all assets with the four-root command in the repository README.
-8. Compare consolidated tables and figures at the seed-summary and confidence-
+7. Execute the SAML-D beta sweep with `--methods fedtypo` and
+   `--registry-beta-grid 0,0.05,0.10,0.15,0.20,0.30`.
+8. Regenerate all assets with the five-root command in the repository README.
+9. Compare consolidated tables and figures at the seed-summary and confidence-
    interval level. Hardware/library differences need not yield byte-identical
    intermediate floating-point values.
 

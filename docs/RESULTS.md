@@ -26,6 +26,27 @@ the highest mean P@50 in both primary datasets and conditions relevant to the
 headline comparisons (IBM control 0.0142, IBM drift 0.0143, SAML-D control
 0.0336, SAML-D drift 0.0316).
 
+## Registry-score sensitivity
+
+The SAML-D beta sweep re-scores the same ten paired FedTypo trajectories at
+`0`, `0.05`, `0.10`, `0.15`, `0.20`, and `0.30`; it does not retrain models or
+change registry admission. The preselected `beta=0.15` files are byte-for-byte
+identical to the primary FedTypo files for all six metric families, two
+conditions, and ten seeds (120 checks).
+
+- In control, mean AUPRC rises from 0.001345 at beta 0 to 0.001487 at beta
+  0.15 (+10.6%), but the five-setting Holm-adjusted contrast is not
+  significant (`p_H=0.312`). P@50 changes from 0.014156 to 0.013222
+  (`p_H=0.938`).
+- Under drift, mean AUPRC rises from 0.001311 at beta 0 to 0.001963 at beta
+  0.15 (+49.8%, `p_H=0.039`). Every nonzero beta has `p_H=0.039`; the
+  numerical peak is beta 0.10 at 0.001994, followed by a broad plateau through
+  0.30. P@50 changes from 0.013689 to 0.016156 at beta 0.15 but is not
+  significant (`p_H=0.750`).
+
+The sweep shows a drift-ranking response without validating earlier
+cross-silo capture or performance at the prespecified alert budget.
+
 ## Mechanism boundary
 
 - **Registry:** IBM one- and three-window post-onset differences are exactly

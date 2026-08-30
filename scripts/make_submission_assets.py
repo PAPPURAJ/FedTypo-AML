@@ -19,7 +19,6 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
-from matplotlib.ticker import PercentFormatter
 import numpy as np
 import pandas as pd
 
@@ -785,95 +784,67 @@ def temporal_support_summary(root: Path) -> pd.DataFrame:
 
 
 def build_temporal_support_figure(roots: dict[str, Path], path: Path) -> None:
-    """Show the label-free support rule and the resulting prevalence trace."""
+    """Show the label-free support rule at its final manuscript size."""
     datasets = [("IBM AMLworld", roots["ibm"]), ("SAML-D", roots["samld"])]
-    fig, axes = plt.subplots(1, 2, figsize=(7.15, 2.55), sharey=False)
-    legend_handles = []
-    legend_labels = []
-    for panel, (ax, (dataset, root)) in enumerate(zip(axes, datasets)):
+    fig, ax = plt.subplots(figsize=(3.65, 1.28))
+    colors = {"IBM AMLworld": "#2878B5", "SAML-D": "#C44E52"}
+    markers = {"IBM AMLworld": "o", "SAML-D": "D"}
+    for dataset, root in datasets:
         raw = load_raw_window_counts(root).sort_values("window")
         support = temporal_support_summary(root)
         if support.empty:
             continue
-        bars = ax.bar(
-            raw["window"],
-            raw["transactions"],
-            width=0.82,
-            color="#D9D9D9",
-            edgecolor="#9B9B9B",
-            linewidth=0.35,
-            label="Raw transaction support",
-            zorder=1,
-        )
-        retained = ax.plot(
-            support["window"],
-            support["transactions"],
-            color="#2878B5",
-            marker="o",
-            markersize=2.8,
-            linewidth=1.0,
-            label="Retained support",
-            zorder=3,
-        )[0]
         last_retained = int(support["window"].max())
+        kept = raw[raw["window"] <= last_retained]
+        ax.plot(
+            kept["window"],
+            kept["transactions"],
+            color=colors[dataset],
+            marker=markers[dataset],
+            markersize=2.5,
+            linewidth=1.0,
+            label="IBM supported" if dataset == "IBM AMLworld" else "SAML-D supported",
+            zorder=3,
+        )
         if int(raw["window"].max()) > last_retained:
+            tail = raw[raw["window"] >= last_retained]
+            ax.plot(
+                tail["window"],
+                tail["transactions"],
+                color="#9A4444",
+                marker="x",
+                markersize=2.8,
+                linewidth=0.9,
+                linestyle="--",
+                label="IBM tail",
+                zorder=2,
+            )
             ax.axvspan(
                 last_retained + 0.5,
                 float(raw["window"].max()) + 0.5,
                 color="#F4B6B6",
-                alpha=0.22,
+                alpha=0.18,
                 linewidth=0,
             )
-            ax.text(
-                last_retained + 0.65,
-                0.95,
-                "excluded sparse tail",
-                transform=ax.get_xaxis_transform(),
-                fontsize=5.8,
-                color="#9A4444",
-                va="top",
-            )
-        ax.axvspan(-0.5, 0.5, color="#F6D58F", alpha=0.20, linewidth=0)
-        ax.set_yscale("log")
-        ax.set_title(dataset, fontsize=9)
-        ax.set_xlabel("Natural window", fontsize=8)
-        ax.set_ylabel("Transactions (log scale)", fontsize=8)
-        ax.grid(True, axis="y", linewidth=0.35, alpha=0.4)
-        ax.tick_params(labelsize=7.2)
-        ax.set_xlim(-0.6, float(raw["window"].max()) + 0.6)
-
-        prevalence_ax = ax.twinx()
-        prevalence = prevalence_ax.plot(
-            support["window"],
-            support["prevalence"],
-            color="#C44E52",
-            marker="D",
-            markersize=2.5,
-            linewidth=1.0,
-            label="Suspicious prevalence",
-            zorder=4,
-        )[0]
-        prevalence_ax.set_ylabel("Suspicious prevalence", fontsize=8, color="#9F363A")
-        prevalence_ax.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=2))
-        prevalence_ax.tick_params(axis="y", labelsize=7.0, colors="#9F363A")
-        prevalence_ax.set_ylim(bottom=0)
-        if panel == 0:
-            legend_handles = [bars, retained, prevalence]
-            legend_labels = [
-                "Raw transaction support",
-                "Retained support",
-                "Suspicious prevalence",
-            ]
+    ax.axvspan(-0.5, 0.5, color="#F6D58F", alpha=0.18, linewidth=0)
+    ax.set_yscale("log")
+    ax.set_xlabel("Natural window", fontsize=7)
+    ax.set_ylabel("Transactions (log)", fontsize=7)
+    ax.set_xlim(-0.6, 18.6)
+    ax.set_xticks([0, 5, 10, 15])
+    ax.grid(True, axis="y", linewidth=0.35, alpha=0.4)
+    ax.tick_params(labelsize=6.8)
+    handles, labels = ax.get_legend_handles_labels()
     fig.legend(
-        legend_handles,
-        legend_labels,
+        handles,
+        labels,
         loc="upper center",
         ncol=3,
-        fontsize=7.0,
+        fontsize=6.2,
         frameon=False,
     )
-    fig.tight_layout(rect=(0, 0, 1, 0.89), w_pad=1.8)
-    fig.savefig(path, bbox_inches="tight")
+    fig.tight_layout(rect=(0, 0, 1, 0.86), pad=0.35)
+    fig.savefig(path)
     plt.close(fig)
 
 
@@ -918,7 +889,7 @@ def build_ablation_figure(roots: dict[str, Path], path: Path) -> None:
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper center", ncol=2, fontsize=7.2, frameon=False)
     fig.tight_layout(rect=(0, 0, 1, 0.91), w_pad=1.4)
-    fig.savefig(path, bbox_inches="tight")
+    fig.savefig(path)
     plt.close(fig)
 
 
@@ -1005,7 +976,9 @@ def build_prototype_figure(roots: dict[str, Path], path: Path) -> None:
     metrics = [("purity", "Purity"), ("nmi", "NMI"), ("ari", "ARI")]
     x = np.arange(len(groups))
     width = 0.24
-    fig, ax = plt.subplots(figsize=(7.15, 2.6))
+    # The manuscript places this panel at roughly half text width.  Matching
+    # that final size preserves publication-readable typography.
+    fig, ax = plt.subplots(figsize=(3.35, 1.28))
     for idx, (metric, label) in enumerate(metrics):
         means = [g[metric].mean() if not g.empty else np.nan for _, g in groups]
         errors = [
@@ -1023,11 +996,11 @@ def build_prototype_figure(roots: dict[str, Path], path: Path) -> None:
         )
     ax.axhline(0, color="#555555", linewidth=0.5)
     ax.set_xticks(x, [name for name, _ in groups])
-    ax.set_ylabel("Agreement with annotated typology", fontsize=8)
+    ax.set_ylabel("Typology agreement", fontsize=7)
     ax.set_ylim(-0.2, 1.0)
     ax.grid(True, axis="y", linewidth=0.35, alpha=0.45)
-    ax.tick_params(labelsize=7.5)
-    ax.legend(ncol=3, loc="upper center", fontsize=7.5, frameon=False)
+    ax.tick_params(labelsize=6.8)
+    ax.legend(ncol=3, loc="upper center", fontsize=6.8, frameon=False)
     fig.tight_layout()
     fig.savefig(path, bbox_inches="tight")
     plt.close(fig)
@@ -1085,6 +1058,116 @@ def inoculation(root: Path, method: str, horizon: int = -1) -> tuple[float, floa
 
 def tex_macro(name: str, value: str) -> str:
     return f"\\newcommand{{\\{name}}}{{{value}}}\n"
+
+
+def append_registry_beta_macros(chunks: list[str], root: Path) -> None:
+    """Validate and emit the SAML-D registry-score sensitivity table."""
+    expected_conditions = {"control", "drift"}
+    expected_seeds = set(range(42, 52))
+    expected_betas = [0.0, 0.05, 0.10, 0.15, 0.20, 0.30]
+
+    environment_path = root / "environment.json"
+    if not environment_path.exists():
+        raise RuntimeError(f"Missing result file: {environment_path}")
+    environment = json.loads(environment_path.read_text(encoding="utf-8"))
+    config = environment.get("config", {})
+    recorded_betas = [float(value) for value in config.get("registry_beta_grid", [])]
+    if recorded_betas != expected_betas:
+        raise RuntimeError(
+            f"{environment_path}: expected registry beta grid {expected_betas}, "
+            f"found {recorded_betas}"
+        )
+
+    seed_table = read_csv_columns(
+        root / "registry_beta_seed_summary.csv",
+        {"condition", "seed", "beta", "auprc", "p_at_budget"},
+    )
+    if set(seed_table.condition) != expected_conditions:
+        raise RuntimeError(f"{root}: incomplete registry-beta conditions")
+    if set(seed_table.seed.astype(int)) != expected_seeds:
+        raise RuntimeError(f"{root}: registry-beta seeds must be 42--51")
+    observed_cells = set(
+        zip(
+            seed_table.condition,
+            seed_table.seed.astype(int),
+            seed_table.beta.astype(float),
+        )
+    )
+    expected_cells = {
+        (condition, seed, beta)
+        for condition in expected_conditions
+        for seed in expected_seeds
+        for beta in expected_betas
+    }
+    if observed_cells != expected_cells or len(seed_table) != len(expected_cells):
+        raise RuntimeError(f"{root}: registry-beta seed matrix is incomplete")
+    validate_finite(seed_table, ["auprc", "p_at_budget"], root)
+
+    summary = read_csv_columns(
+        root / "registry_beta_summary.csv",
+        {
+            "condition",
+            "beta",
+            "n_seeds",
+            "auprc_mean",
+            "p_at_budget_mean",
+        },
+    )
+    tests = read_csv_columns(
+        root / "registry_beta_tests.csv",
+        {
+            "condition",
+            "metric",
+            "reference_beta",
+            "beta",
+            "n_seeds",
+            "mean_difference",
+            "p_holm",
+        },
+    )
+    validate_finite(summary, ["beta", "auprc_mean", "p_at_budget_mean"], root)
+    validate_finite(tests, ["beta", "mean_difference", "p_holm"], root)
+
+    indexed = summary.set_index(["condition", "beta"])
+    rows = []
+    for beta in expected_betas:
+        control = indexed.loc[("control", beta)]
+        drift = indexed.loc[("drift", beta)]
+        label = "$0.15^{\\dagger}$" if beta == 0.15 else f"{beta:.2f}"
+        rows.append(
+            "{} & {} & {} & {} & {} \\\\".format(
+                label,
+                fmt(control.auprc_mean, 6),
+                fmt(control.p_at_budget_mean, 4),
+                fmt(drift.auprc_mean, 6),
+                fmt(drift.p_at_budget_mean, 4),
+            )
+        )
+    chunks.append(
+        "\\newcommand{\\SAMLRegistryBetaRows}{%%\n%s\n}\n" % "\n".join(rows)
+    )
+
+    reference = indexed.xs(0.0, level="beta")
+    selected = indexed.xs(0.15, level="beta")
+    selected_tests = tests[np.isclose(tests.beta, 0.15)].set_index(
+        ["condition", "metric"]
+    )
+    for condition, suffix in [("control", "Control"), ("drift", "Drift")]:
+        gain = selected.loc[condition, "auprc_mean"] / reference.loc[
+            condition, "auprc_mean"
+        ] - 1
+        chunks.append(tex_macro(f"SAMLRegistryBeta{suffix}AUPRCGain", pct(gain)))
+        for metric, metric_suffix in [
+            ("auprc", "AUPRC"),
+            ("p_at_budget", "PatFifty"),
+        ]:
+            row = selected_tests.loc[(condition, metric)]
+            chunks.append(
+                tex_macro(
+                    f"SAMLRegistryBeta{suffix}{metric_suffix}PHolm",
+                    sci(float(row.p_holm)),
+                )
+            )
 
 
 def table_macro(
@@ -1327,6 +1410,7 @@ def write_results_tex(
     roots: dict[str, Path],
     path: Path,
     secondary_roots: dict[str, Path] | None = None,
+    registry_beta_root: Path | None = None,
 ) -> None:
     chunks = [
         "% Auto-generated by make_submission_assets.py; do not edit by hand.\n"
@@ -1417,6 +1501,8 @@ def write_results_tex(
         "\\newcommand{\\DriftEffectRows}{%%\n%s\n}\n" % "\n".join(effect_rows)
     )
     chunks.append(tex_macro("DriftTwoSidedRows", "\\DriftEffectRows"))
+    if registry_beta_root is not None:
+        append_registry_beta_macros(chunks, registry_beta_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(chunks), encoding="utf-8")
 
@@ -1445,6 +1531,11 @@ def main() -> None:
             "backward-compatible alias"
         ),
     )
+    parser.add_argument(
+        "--samld-registry-beta",
+        type=Path,
+        help="SAML-D registry-score beta-sensitivity result root",
+    )
     parser.add_argument("--figdir", type=Path, required=True)
     parser.add_argument("--tex", type=Path)
     parser.add_argument("--architecture-only", action="store_true")
@@ -1454,8 +1545,16 @@ def main() -> None:
         build_architecture(args.figdir / "architecture.pdf")
         print(f"Wrote {args.figdir / 'architecture.pdf'}")
         return
-    if args.ibm is None or args.samld is None or args.tex is None:
-        parser.error("--ibm, --samld, and --tex are required for result assets")
+    if (
+        args.ibm is None
+        or args.samld is None
+        or args.samld_registry_beta is None
+        or args.tex is None
+    ):
+        parser.error(
+            "--ibm, --samld, --samld-registry-beta, and --tex are required "
+            "for result assets"
+        )
     roots = {"ibm": args.ibm, "samld": args.samld}
     for root in roots.values():
         validate_root(root)
@@ -1492,7 +1591,12 @@ def main() -> None:
     build_ablation_figure(roots, args.figdir / "ablations.pdf")
     build_budget_figure(roots, args.figdir / "budget_sensitivity.pdf")
     build_prototype_figure(roots, args.figdir / "prototype_fidelity.pdf")
-    write_results_tex(roots, args.tex, secondary_roots=secondary_roots)
+    write_results_tex(
+        roots,
+        args.tex,
+        secondary_roots=secondary_roots,
+        registry_beta_root=args.samld_registry_beta,
+    )
     print(f"Wrote figures to {args.figdir} and macros to {args.tex}")
 
 

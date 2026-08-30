@@ -49,6 +49,21 @@ if N_SUBMISSION_SEEDS < 1:
     raise ValueError("FT_N_SEEDS must be at least 1")
 SUBMISSION_SEEDS = tuple(range(42,42+N_SUBMISSION_SEEDS))
 
+_registry_beta_grid_text=os.environ.get("FT_REGISTRY_BETA_GRID","").strip()
+REGISTRY_BETA_GRID=(
+    tuple(dict.fromkeys(
+        float(value.strip())
+        for value in _registry_beta_grid_text.split(",")
+        if value.strip()
+    ))
+    if _registry_beta_grid_text else tuple()
+)
+if any(not 0.0 <= beta <= 1.0 for beta in REGISTRY_BETA_GRID):
+    raise ValueError("FT_REGISTRY_BETA_GRID values must lie in [0, 1]")
+
+def beta_slug(beta):
+    return f"{beta:.4f}".rstrip("0").rstrip(".").replace(".","p")
+
 import math, json, random
 import hashlib
 import numpy as np, pandas as pd
@@ -537,18 +552,21 @@ class Client:
     @torch.no_grad()
     def predict(self, w, registry=None):
         sub=self.txns[self.txns.time_window==w]
-        if len(sub)==0: return sub, np.array([]), None
+        if len(sub)==0:
+            empty=np.array([])
+            return sub,empty,None,empty,empty
         src,dst,ef=self._tensors(sub)
         new_mem,emb=self.backbone(self.mem,src,dst,ef)
-        score=torch.sigmoid(self.head(emb)).cpu().numpy()
+        base_score=torch.sigmoid(self.head(emb)).cpu().numpy()
+        registry_similarity=np.zeros_like(base_score)
         if registry is not None and len(registry)>0:
             R=F.normalize(torch.tensor(np.stack(registry),device=DEV,dtype=torch.float32),dim=1)
             E=F.normalize(emb,dim=1)
-            boost=(E@R.T).max(1).values.clamp_min(0).cpu().numpy()
-            score=np.clip(score+BETA_REGISTRY*boost,0,1)
+            registry_similarity=(E@R.T).max(1).values.clamp_min(0).cpu().numpy()
+        score=np.clip(base_score+BETA_REGISTRY*registry_similarity,0,1)
         self.mem=new_mem                      # prequential temporal memory advance
         self._update_stats(sub)               # current unlabeled window, never future data
-        return sub, score, emb.cpu()
+        return sub,score,emb.cpu(),base_score,registry_similarity
     def train_round(self, w, mu_prox=0.0, global_state=None,
                     global_class_protos=None, mu_proto=0.0):
         vis_conf=self.txns[(self.txns.confirmed_window<=w)&(self.txns.time_window<=w)]
@@ -817,7 +835,12 @@ def run_method(method, df, assign, seed=SEED, verbose=True):
              for c in range(K_CLIENTS)]
     registry=[]; ref_emb={c.id:None for c in clients}
     global_class_protos={}
-    rows=[]; proto_rows=[]; global_params=[
+    rows=[]; proto_rows=[]
+    beta_rows=(
+        {beta:[] for beta in REGISTRY_BETA_GRID}
+        if method=="fedtypo" and REGISTRY_BETA_GRID else {}
+    )
+    global_params=[
         p.detach().clone() for p in clients[0].backbone.parameters()
     ]
     groups={c.id:0 for c in clients}          # v4: persistent, refreshed periodically
@@ -827,10 +850,17 @@ def run_method(method, df, assign, seed=SEED, verbose=True):
         # ---- TEST window w before training on it ----
         window_scores = {c.id: None for c in clients}
         for c in clients:
-            sub,score,emb=c.predict(w, registry if method=="fedtypo" else None)  # noreg: no boost
+            sub,score,emb,base_score,registry_similarity=c.predict(
+                w,registry if method=="fedtypo" else None)  # noreg: no boost
             if len(sub):
                 rows.append(pd.DataFrame(dict(window=w,client=c.id,score=score,
                     label=sub.label.values,typ=sub.typology_id.values)))
+                for beta,parts in beta_rows.items():
+                    sensitivity_score=np.clip(
+                        base_score+beta*registry_similarity,0,1)
+                    parts.append(pd.DataFrame(dict(
+                        window=w,client=c.id,score=sensitivity_score,
+                        label=sub.label.values,typ=sub.typology_id.values)))
                 window_scores[c.id] = score
             if method in FEDTYPO_METHODS and emb is not None:
                 e=emb.numpy(); c.signal1(e, ref_emb[c.id]); ref_emb[c.id]=e
@@ -934,8 +964,12 @@ def run_method(method, df, assign, seed=SEED, verbose=True):
         if OPTIMIZER_POLICY=="per_round" or broadcasted:
             for c in clients: c.reset_optimizer()
         if verbose and w%5==0: print(f"  [{method}] window {w}/{N_WINDOWS}")
-    return (pd.concat(rows,ignore_index=True), pd.DataFrame(registry_log),
-            pd.DataFrame(proto_rows))
+    beta_results={
+        beta:pd.concat(parts,ignore_index=True)
+        for beta,parts in beta_rows.items()
+    }
+    return (pd.concat(rows,ignore_index=True),pd.DataFrame(registry_log),
+            pd.DataFrame(proto_rows),beta_results)
 
 def metrics_table(res):
     out=[]
@@ -1010,6 +1044,8 @@ METHODS_FULL=([m.strip() for m in requested_methods.split(",") if m.strip()]
 unknown_methods=sorted(set(METHODS_FULL)-set(ALL_METHODS))
 if unknown_methods:
     raise ValueError(f"Unknown FT_METHODS entries: {unknown_methods}")
+if REGISTRY_BETA_GRID and "fedtypo" not in METHODS_FULL:
+    raise ValueError("FT_REGISTRY_BETA_GRID requires FT_METHODS to include fedtypo")
 requested_conditions=os.environ.get("FT_CONDITIONS","control,drift")
 CONDITIONS=tuple(c.strip() for c in requested_conditions.split(",") if c.strip())
 if not CONDITIONS or set(CONDITIONS)-{"control","drift"}:
@@ -1072,6 +1108,7 @@ with open(f"{RES2}/environment.json","w") as f:
             "delay_median_cycles":DELAY_MEDIAN_WINDOWS,
             "max_prototypes":M_PROTO,"min_confirmed_positive":MIN_CONF_POS,
             "rho":RHO_DAMP,"registry_beta":BETA_REGISTRY,
+            "registry_beta_grid":list(REGISTRY_BETA_GRID),
             "novelty_gate":NOVELTY_GATE,"fedproto_mu":MU_PROTO,
             "budget":BUDGET_K,
         }},f,indent=2)
@@ -1184,7 +1221,7 @@ for cond, seed in EXPERIMENTS_FULL:
         if os.path.exists(done):
             print(f"  {tag}/{m}: already complete, skipping"); continue
         print(f"### running {tag} / {m}",flush=True)
-        r, rlog, pdiag = run_method(
+        r,rlog,pdiag,beta_results=run_method(
             "local" if m=="local_only" else m,
             df_e,assign_e,seed=seed,verbose=False)
         metrics_table(r).to_csv(f"{d_out}/client_metrics_{m}.csv",index=False)
@@ -1199,6 +1236,20 @@ for cond, seed in EXPERIMENTS_FULL:
             rlog.to_csv(f"{d_out}/registry_{m}.csv",index=False)
         if len(pdiag):
             pdiag.to_csv(f"{d_out}/prototype_{m}.csv",index=False)
+        for beta,beta_result in beta_results.items():
+            suffix=f"fedtypo_beta_{beta_slug(beta)}"
+            metrics_table(beta_result).to_csv(
+                f"{d_out}/client_metrics_{suffix}.csv",index=False)
+            stream_metrics_table(beta_result).to_csv(
+                f"{d_out}/stream_metrics_{suffix}.csv",index=False)
+            per_window(beta_result).to_csv(
+                f"{d_out}/window_metrics_{suffix}.csv",index=False)
+            budget_table(beta_result).to_csv(
+                f"{d_out}/budget_metrics_{suffix}.csv",index=False)
+            typology_table(beta_result).to_csv(
+                f"{d_out}/typology_metrics_{suffix}.csv",index=False)
+            inoculation_table(beta_result,events_e).to_csv(
+                f"{d_out}/inoculation_{suffix}.csv",index=False)
         if os.environ.get("FT_SAVE_PREDICTIONS","0")=="1" and seed==42:
             r.to_csv(f"{d_out}/preds_{m}.csv.gz",index=False,compression="gzip")
         open(done,"w").write("ok")
@@ -1369,6 +1420,101 @@ if "drift" in CONDITIONS and {"fedtypo","fedtypo_noreg"}.issubset(METHODS_FULL):
     adjusted=holm_adjust([row["p_raw"] for row in mechanism_rows])
     for row,p_holm in zip(mechanism_rows,adjusted): row["p_holm"]=float(p_holm)
 pd.DataFrame(mechanism_rows).to_csv(f"{RES2}/mechanism_tests.csv",index=False)
+
+# Registry-beta sensitivity is evaluated from one trained FedTypo trajectory
+# per seed.  Beta affects only the inference-time score, so every grid value
+# shares the same model states, registry admissions, labels, and examples.
+if REGISTRY_BETA_GRID:
+    beta_seed_rows=[]
+    for cond in CONDITIONS:
+        for seed in SUBMISSION_SEEDS:
+            directory=f"{RES2}/{cond}_s{seed}"
+            for beta in REGISTRY_BETA_GRID:
+                suffix=f"fedtypo_beta_{beta_slug(beta)}"
+                stream=pd.read_csv(f"{directory}/stream_metrics_{suffix}.csv")
+                clients=pd.read_csv(f"{directory}/client_metrics_{suffix}.csv")
+                clients=clients[(clients.window>=EVAL_START_W)&
+                                (clients.window<VALID_W)]
+                windows=pd.read_csv(f"{directory}/window_metrics_{suffix}.csv")
+                windows=windows[(windows.window>=EVAL_START_W)&
+                                (windows.window<VALID_W)]
+                valid=clients[np.isfinite(clients.auprc)].copy()
+                weighted=(np.average(valid.auprc,weights=valid.transactions)
+                          if len(valid) else np.nan)
+                beta_seed_rows.append(dict(
+                    condition=cond,seed=seed,beta=beta,
+                    auprc=stream.auprc.mean(),
+                    ap_lift=stream.ap_lift.mean(),
+                    p_at_budget=clients.p_at_budget.mean(),
+                    window_macro_auprc=windows.auprc.mean(),
+                    transaction_weighted_window_auprc=weighted))
+    beta_seed_df=pd.DataFrame(beta_seed_rows)
+    beta_seed_df.to_csv(f"{RES2}/registry_beta_seed_summary.csv",index=False)
+
+    beta_summary_rows=[]
+    for (cond,beta),group in beta_seed_df.groupby(["condition","beta"]):
+        row=dict(condition=cond,beta=beta,n_seeds=len(group))
+        for metric in SUMMARY_METRICS:
+            lo,hi=bootstrap_ci(group[metric])
+            row.update({f"{metric}_mean":group[metric].mean(),
+                        f"{metric}_std":group[metric].std(ddof=1),
+                        f"{metric}_ci_lo":lo,f"{metric}_ci_hi":hi})
+        beta_summary_rows.append(row)
+    pd.DataFrame(beta_summary_rows).to_csv(
+        f"{RES2}/registry_beta_summary.csv",index=False)
+
+    reference_beta=(0.0 if 0.0 in REGISTRY_BETA_GRID
+                    else BETA_REGISTRY)
+    beta_test_rows=[]; beta_difference_rows=[]
+    for cond in CONDITIONS:
+        for metric in ("auprc","p_at_budget"):
+            reference=(beta_seed_df[
+                (beta_seed_df.condition==cond)&
+                np.isclose(beta_seed_df.beta,reference_beta)
+            ].set_index("seed"))
+            family=[]
+            for beta in REGISTRY_BETA_GRID:
+                if np.isclose(beta,reference_beta):
+                    continue
+                candidate=(beta_seed_df[
+                    (beta_seed_df.condition==cond)&
+                    np.isclose(beta_seed_df.beta,beta)
+                ].set_index("seed"))
+                common=reference.index.intersection(candidate.index)
+                diff=(candidate.loc[common,metric]-
+                      reference.loc[common,metric]).to_numpy(dtype=float)
+                if len(diff)<2 or np.allclose(diff,0):
+                    stat,p=0.0,1.0
+                else:
+                    stat,p=wilcoxon(diff,alternative="two-sided",method="auto")
+                lo,hi=bootstrap_ci(diff)
+                sd=np.std(diff,ddof=1) if len(diff)>1 else np.nan
+                wins,ties,losses=signed_outcome_counts(diff)
+                row=dict(
+                    condition=cond,metric=metric,
+                    reference_beta=reference_beta,beta=beta,n_seeds=len(common),
+                    statistic=float(stat),p_raw=float(p),
+                    mean_difference=(float(np.mean(diff)) if len(diff) else np.nan),
+                    difference_ci_lo=lo,difference_ci_hi=hi,
+                    median_difference=(float(np.median(diff)) if len(diff) else np.nan),
+                    cohen_dz=(float(np.mean(diff)/sd)
+                              if np.isfinite(sd) and sd>0 else np.nan),
+                    rank_biserial=signed_rank_effect(diff),
+                    wins=wins,ties=ties,losses=losses)
+                family.append(row)
+                for seed_value,delta in zip(common,diff):
+                    beta_difference_rows.append(dict(
+                        condition=cond,metric=metric,
+                        reference_beta=reference_beta,beta=beta,
+                        seed=int(seed_value),difference=float(delta)))
+            adjusted=holm_adjust([row["p_raw"] for row in family])
+            for row,p_holm in zip(family,adjusted):
+                row["p_holm"]=float(p_holm)
+            beta_test_rows.extend(family)
+    pd.DataFrame(beta_test_rows).to_csv(
+        f"{RES2}/registry_beta_tests.csv",index=False)
+    pd.DataFrame(beta_difference_rows).to_csv(
+        f"{RES2}/registry_beta_paired_differences.csv",index=False)
 
 print(summary_df.to_string(index=False))
 if len(primary_tests_df): print(primary_tests_df.to_string(index=False))

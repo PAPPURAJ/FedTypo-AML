@@ -1,0 +1,7 @@
+client,typology,onset,stagger,horizon_windows,positives,captured,capture_rate
+0,1,9,1.0,1,21,0,0.0
+0,1,9,1.0,3,87,0,0.0
+0,1,9,1.0,-1,297,0,0.0
+2,1,12,2.0,1,59,0,0.0
+2,1,12,2.0,3,136,0,0.0
+2,1,12,2.0,-1,296,0,0.0

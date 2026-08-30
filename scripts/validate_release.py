@@ -31,6 +31,18 @@ ROOTS = {
         "samld", "typology_skew", SECONDARY_METHODS,
     ),
 }
+BETA_ROOT_NAME = "tifs_registry_beta_rtx3060_v1_samld_account_hash"
+BETA_VALUES = (0.0, 0.05, 0.10, 0.15, 0.20, 0.30)
+BETA_STEMS = (
+    "client_metrics", "window_metrics", "stream_metrics", "budget_metrics",
+    "typology_metrics", "inoculation",
+)
+BETA_AGGREGATES = (
+    "environment.json", "raw_window_counts.csv", "seed_summary.csv",
+    "method_summary.csv", "registry_beta_seed_summary.csv",
+    "registry_beta_summary.csv", "registry_beta_tests.csv",
+    "registry_beta_paired_differences.csv",
+)
 AGGREGATES = (
     "environment.json", "seed_summary.csv", "method_summary.csv",
     "seed_level_tests.csv", "paired_differences.csv", "ablation_tests.csv",
@@ -75,6 +87,10 @@ def require(path: Path, missing: list[str]) -> None:
         missing.append(str(path.relative_to(ROOT)))
 
 
+def beta_slug(value: float) -> str:
+    return f"{value:.10g}".replace("-", "m").replace(".", "p")
+
+
 def assert_finite_csv(path: Path) -> None:
     for line_number, row in enumerate(csv_rows(path), start=2):
         for key, value in row.items():
@@ -108,6 +124,7 @@ def main() -> None:
         raise RuntimeError("required files are missing:\n" + "\n".join(missing))
 
     executed_hash = file_hash(EXECUTED_SOURCE)
+    current_hash = file_hash(CURRENT_SOURCE)
     post_hash = file_hash(POSTPROCESSOR)
     total_result_files = 0
 
@@ -170,6 +187,108 @@ def main() -> None:
             assert_finite_csv(csv_path)
         total_result_files += sum(1 for path in result_root.rglob("*") if path.is_file())
 
+    beta_root = ROOT / "results" / BETA_ROOT_NAME
+    for aggregate in BETA_AGGREGATES:
+        require(beta_root / aggregate, missing)
+    if not missing:
+        environment = json.loads(
+            (beta_root / "environment.json").read_text(encoding="utf-8")
+        )
+        beta_checks = {
+            "dataset": environment.get("dataset") == "samld",
+            "partition": environment.get("config", {}).get("partition_mode")
+            == "account_hash",
+            "optimizer": environment.get("config", {}).get("optimizer_policy")
+            == "per_round",
+            "source hash": environment.get("script_sha256") == current_hash,
+            "seeds": tuple(environment.get("seeds", ())) == SEEDS,
+            "conditions": tuple(environment.get("conditions", ())) == CONDITIONS,
+            "methods": tuple(environment.get("methods", ())) == ("fedtypo",),
+            "beta grid": tuple(
+                float(value)
+                for value in environment.get("config", {}).get(
+                    "registry_beta_grid", ()
+                )
+            )
+            == BETA_VALUES,
+            "python": str(environment.get("python", "")).startswith("3.13.5"),
+            "torch": environment.get("torch") == "2.9.0+cu128",
+            "cuda": environment.get("cuda") == "12.8",
+            "device": environment.get("device") == "NVIDIA GeForce RTX 3060",
+        }
+        failed = [label for label, passed in beta_checks.items() if not passed]
+        if failed:
+            raise RuntimeError(
+                f"{BETA_ROOT_NAME} metadata mismatch: {', '.join(failed)}"
+            )
+
+        beta_seed_rows = csv_rows(beta_root / "registry_beta_seed_summary.csv")
+        expected_cells = {
+            (condition, seed, beta)
+            for condition in CONDITIONS
+            for seed in SEEDS
+            for beta in BETA_VALUES
+        }
+        observed_cells = {
+            (row["condition"], int(row["seed"]), float(row["beta"]))
+            for row in beta_seed_rows
+        }
+        if len(beta_seed_rows) != 120 or observed_cells != expected_cells:
+            raise RuntimeError(f"{BETA_ROOT_NAME}: incomplete 120-cell beta matrix")
+        expected_aggregate_rows = {
+            "registry_beta_summary.csv": 12,
+            "registry_beta_tests.csv": 20,
+            "registry_beta_paired_differences.csv": 200,
+        }
+        for name, expected_rows in expected_aggregate_rows.items():
+            actual_rows = len(csv_rows(beta_root / name))
+            if actual_rows != expected_rows:
+                raise RuntimeError(
+                    f"{BETA_ROOT_NAME}/{name}: expected {expected_rows} rows, "
+                    f"found {actual_rows}"
+                )
+
+        primary_samld = ROOT / "results" / "tifs_revision_v1_samld_account_hash"
+        equivalence_checks = 0
+        for condition in CONDITIONS:
+            for seed in SEEDS:
+                run_root = beta_root / f"{condition}_s{seed}"
+                require(run_root / "DONE_fedtypo", missing)
+                for stem in BETA_STEMS:
+                    configured = run_root / f"{stem}_fedtypo.csv"
+                    selected = run_root / f"{stem}_fedtypo_beta_0p15.csv"
+                    original = (
+                        primary_samld
+                        / f"{condition}_s{seed}"
+                        / f"{stem}_fedtypo.csv"
+                    )
+                    for path in (configured, selected, original):
+                        require(path, missing)
+                    if all(path.is_file() for path in (configured, selected, original)):
+                        hashes = {file_hash(path) for path in (configured, selected, original)}
+                        if len(hashes) != 1:
+                            raise RuntimeError(
+                                f"beta=0.15 reproduction mismatch: "
+                                f"{condition}_s{seed}/{stem}"
+                            )
+                        equivalence_checks += 1
+                    for beta in BETA_VALUES:
+                        require(
+                            run_root
+                            / f"{stem}_fedtypo_beta_{beta_slug(beta)}.csv",
+                            missing,
+                        )
+        if equivalence_checks != 120:
+            raise RuntimeError(
+                f"expected 120 beta=0.15 equivalence checks, found "
+                f"{equivalence_checks}"
+            )
+        for csv_path in beta_root.rglob("*.csv"):
+            assert_finite_csv(csv_path)
+        total_result_files += sum(
+            1 for path in beta_root.rglob("*") if path.is_file()
+        )
+
     if missing:
         raise RuntimeError(
             "required files are missing:\n" +
@@ -185,7 +304,8 @@ def main() -> None:
 
     print(
         "Release validation passed: "
-        f"{len(ROOTS)} roots, {total_result_files} result files, "
+        f"{len(ROOTS) + 1} roots, {total_result_files} result files, "
+        "120 byte-identical beta=0.15 reproduction checks, "
         f"executed source {executed_hash}, postprocessor {post_hash}"
     )
 

@@ -33,6 +33,10 @@ def main() -> None:
     )
     parser.add_argument("--run-name", default="tifs_revision_v1")
     parser.add_argument(
+        "--registry-beta-grid",
+        help="comma-separated inference-time registry boosts in [0,1]",
+    )
+    parser.add_argument(
         "--optimizer-policy",
         choices=("per_round", "broadcast_only"),
         default="per_round",
@@ -54,6 +58,10 @@ def main() -> None:
     os.environ["FT_CONDITIONS"] = args.conditions
     os.environ["FT_RUN_NAME"] = args.run_name
     os.environ["FT_OPTIMIZER_POLICY"] = args.optimizer_policy
+    if args.registry_beta_grid:
+        os.environ["FT_REGISTRY_BETA_GRID"] = args.registry_beta_grid
+    else:
+        os.environ.pop("FT_REGISTRY_BETA_GRID", None)
     if args.methods:
         os.environ["FT_METHODS"] = args.methods
     else:

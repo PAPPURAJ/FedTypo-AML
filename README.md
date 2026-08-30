@@ -20,13 +20,13 @@ raw transaction predictions are not redistributed.
 
 | Path | Contents |
 |---|---|
-| `experiments/run_submission_executed_201bf0f.py` | Exact source used for the four reported result roots |
-| `experiments/run_submission.py` | Current source with mutually exclusive inference tie counts |
+| `experiments/run_submission_executed_201bf0f.py` | Exact source used for the four primary/partition result roots |
+| `experiments/run_submission.py` | Current source with corrected tie counts and shared-trajectory registry-beta sensitivity |
 | `scripts/fix_inference_tie_counts.py` | Audited postprocessor applied only to win/tie/loss counts |
 | `scripts/run_experiment.py` | Command-line experiment entry point |
 | `scripts/make_submission_assets.py` | Figure and LaTeX-macro generator |
 | `scripts/validate_release.py` | Standard-library integrity/completeness validator |
-| `results/` | Two primary account-hash and two typology-skew sensitivity roots |
+| `results/` | Two primary account-hash, two typology-skew, and one registry-beta sensitivity root |
 | `artifacts/figures/` | Six generated vector figures |
 | `artifacts/results_auto.tex` | Generated numerical LaTeX macros |
 | `artifacts/manuscript.pdf` | Revised ten-page manuscript |
@@ -42,9 +42,10 @@ python scripts/validate_release.py
 ```
 
 It verifies the executed-source and postprocessor hashes, dataset/partition
-metadata, ten seeds, both conditions, expected method matrices, required
-per-run files, finite consolidated CSVs, postprocessing manifests, generated
-assets, and absence of raw predictions or old result roots.
+metadata, ten seeds, both conditions, expected method matrices, the complete
+120-cell beta sweep, 120 byte-identical beta=0.15 reproduction checks,
+required per-run files, finite consolidated CSVs, postprocessing manifests,
+generated assets, and absence of raw predictions or old result roots.
 
 ## Install
 
@@ -104,6 +105,17 @@ python scripts/run_experiment.py \
   --data-root data/ibm --output-root outputs --seeds 10
 ```
 
+The SAML-D registry-score sensitivity re-scores each trained FedTypo
+trajectory without retraining or changing registry admission:
+
+```bash
+python scripts/run_experiment.py \
+  --dataset samld --partition account_hash --methods fedtypo \
+  --registry-beta-grid 0,0.05,0.10,0.15,0.20,0.30 \
+  --run-name tifs_registry_beta_rtx3060_v1 \
+  --data-root data/samld --output-root outputs --seeds 10
+```
+
 A fast time-stratified integration run adds `--fast-dev`. Runs are resumable;
 completed method directories contain `DONE_<method>` markers. Raw prediction
 retention is disabled by default.
@@ -116,11 +128,12 @@ python scripts/make_submission_assets.py \
   --samld results/tifs_revision_v1_samld_account_hash \
   --ibm-secondary results/tifs_revision_partition_sensitivity_ibm_typology_skew \
   --samld-secondary results/tifs_revision_partition_sensitivity_samld_typology_skew \
+  --samld-registry-beta results/tifs_registry_beta_rtx3060_v1_samld_account_hash \
   --figdir reproduced/figures \
   --tex reproduced/results_auto.tex
 ```
 
-The builder validates all four roots before writing assets. See
+The builder validates all five roots before writing assets. See
 `docs/REPRODUCIBILITY.md` for the provenance distinction between the executed
 source and the tie-count-only postprocessing step.
 
